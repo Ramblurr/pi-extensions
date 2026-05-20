@@ -1,0 +1,41 @@
+{
+  "name": "@ogulcancelik/pi-ghost",
+  "version": "0.1.4",
+  "description": "Like /btw, but as a native ghost overlay for pi",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "ghost",
+    "gpi",
+    "ephemeral",
+    "overlay",
+    "side-conversation",
+    "coding-agent"
+  ],
+  "author": "Can Celik",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ogulcancelik/pi-extensions.git",
+    "directory": "packages/pi-ghost"
+  },
+  "bugs": {
+    "url": "https://github.com/ogulcancelik/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-ghost#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "assets/ghost-overlay.png",
+    "README.md",
+    "LICENSE"
+  ]
+}
