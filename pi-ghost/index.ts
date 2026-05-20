@@ -13,6 +13,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Container, Input, Key, matchesKey, truncateToWidth, visibleWidth, type Focusable, type KeybindingsManager, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
+import { promptGhostSession } from "./ghost-session.ts";
 
 const OSC133_PROMPT_MARKER_RE = /\x1b\]133;[ABC]\x07/g;
 type GhostMode = "blank" | "fork";
@@ -474,7 +475,7 @@ export default function (pi: ExtensionAPI) {
 						ghostSessionCwd ?? ctx.cwd,
 						ghostModelLabel ?? ctx.model?.id ?? "unknown-model",
 						(text) => {
-							void session.prompt(text, { images: [] });
+							void promptGhostSession(session, text);
 						},
 						() => {
 							setHiddenState(ctx, true);
@@ -489,7 +490,7 @@ export default function (pi: ExtensionAPI) {
 					});
 
 					if (initialPrompt?.trim()) {
-						void session.prompt(initialPrompt.trim(), { images: [] });
+						void promptGhostSession(session, initialPrompt.trim());
 					}
 
 					return {
@@ -549,7 +550,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (prompt) {
 				const session = await ensureGhostSession(ctx, mode);
-				void session.prompt(prompt, { images: [] });
+				void promptGhostSession(session, prompt);
 			}
 			return;
 		}

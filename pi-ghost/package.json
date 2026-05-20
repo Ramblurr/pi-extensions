@@ -35,6 +35,7 @@
   },
   "files": [
     "index.ts",
+    "ghost-session.ts",
     "assets/ghost-overlay.png",
     "README.md",
     "LICENSE"
