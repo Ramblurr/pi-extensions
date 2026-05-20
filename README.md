@@ -5,6 +5,7 @@ Extensions for [pi](https://github.com/earendil-works/pi), the terminal-based co
 | Package | Description |
 |---------|-------------|
 | [pi-ghost](pi-ghost) | Ephemeral btw and side conversation overlay — open a temporary ghost session inside the current pi UI |
+| [handoff](handoff) | `/handoff` context transfer that opens `$VISUAL`/`$EDITOR` before drafting the new-session prompt |
 
 ## Install
 

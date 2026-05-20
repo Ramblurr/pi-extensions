@@ -1,0 +1,27 @@
+{
+  "name": "@ramblurr/andoff",
+  "version": "0.1.0",
+  "description": "Pi /handoff extension that opens $VISUAL or $EDITOR before drafting the new-session prompt",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "handoff"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
