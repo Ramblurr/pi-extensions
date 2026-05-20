@@ -28,11 +28,12 @@ Then reload pi:
 
 ## What it does
 
-`pi-ghost` adds a `/gpi` command that opens a floating overlay backed by a separate **in-memory** `AgentSession`.
+`pi-ghost` adds `/gpi` and `/btw` commands that open a floating overlay backed by a separate **in-memory** `AgentSession`.
 
 So:
 
 - it starts with the **same currently selected model** as the main session
+- `/btw` snapshots the current session context into that in-memory session
 - it uses **no persisted session file**
 - it renders with native pi components for user messages, assistant messages, thinking blocks, and tool execution cards
 - it can be **hidden** without losing the temporary conversation
@@ -67,6 +68,15 @@ You can also pass the first message inline as a shortcut:
 If the overlay is already open, `/gpi <prompt>` sends another message into the ghost session.
 If the overlay is hidden, run `/gpi` again to bring it back.
 
+### `/btw`
+
+Use `/btw` like `/gpi`, but start from an ephemeral in-memory fork of the current session context:
+
+```text
+/btw
+/btw based on what we already discussed, what should I check next?
+```
+
 ## Controls
 
 - `Enter` — send message to ghost pi
@@ -79,7 +89,7 @@ If the overlay is hidden, run `/gpi` again to bring it back.
 When hidden, a small widget is shown above the prompt:
 
 ```text
-/gpi is running • run /gpi to bring it back
+/<command> is running • run /<command> to bring it back
 ```
 
 ## Behavior
@@ -91,11 +101,13 @@ The overlay opens at the latest message and stays in follow mode while new outpu
 It has its own temporary conversation state:
 
 - hide it → state stays in memory
-- run `/gpi` again → continue where you left off
+- run the same command again → continue where you left off
 - close it → state is gone
 
 The ghost session uses the **main session's model at the moment it is created**.
 If you change models in the main session later, the already-open ghost session keeps using its existing model until you close and reopen it.
+
+`/btw` copies the current branch's effective LLM context when it creates the side session; later main-session turns are not synced into an already-open `/btw`.
 
 ## Why
 

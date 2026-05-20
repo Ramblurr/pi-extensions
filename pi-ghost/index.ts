@@ -1,5 +1,6 @@
 import {
 	AssistantMessageComponent,
+	buildSessionContext,
 	createAgentSession,
 	getMarkdownTheme,
 	ToolExecutionComponent,
@@ -14,6 +15,23 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Container, Input, Key, matchesKey, truncateToWidth, visibleWidth, type Focusable, type KeybindingsManager, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 
 const OSC133_PROMPT_MARKER_RE = /\x1b\]133;[ABC]\x07/g;
+type GhostMode = "blank" | "fork";
+type ForkedMessage = Parameters<SessionManager["appendMessage"]>[0];
+
+function cloneForFork<T>(value: T): T {
+	return structuredClone(value);
+}
+
+function createForkedSessionManager(ctx: ExtensionCommandContext): SessionManager {
+	const forked = SessionManager.inMemory(ctx.cwd);
+	const context = buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId());
+
+	for (const message of context.messages) {
+		forked.appendMessage(cloneForFork(message) as ForkedMessage);
+	}
+
+	return forked;
+}
 
 function stripPromptMarkers(lines: string[]): string[] {
 	return lines.map((line) => line.replace(OSC133_PROMPT_MARKER_RE, ""));
@@ -380,9 +398,11 @@ export default function (pi: ExtensionAPI) {
 	let ghostSession: AgentSession | null = null;
 	let ghostSessionCwd: string | null = null;
 	let ghostModelLabel: string | null = null;
+	let ghostMode: GhostMode | null = null;
 	let overlayHandle: OverlayHandle | null = null;
 	let overlayClosed = false;
 
+	const commandForMode = (mode: GhostMode | null) => mode === "fork" ? "btw" : "gpi";
 	const cleanupGhost = (ctx?: ExtensionCommandContext) => {
 		overlayClosed = true;
 		if (overlayHandle) {
@@ -399,6 +419,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		ghostSessionCwd = null;
 		ghostModelLabel = null;
+		ghostMode = null;
 		ctx?.ui.setWidget("pi-ghost", undefined);
 	};
 
@@ -410,7 +431,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.setWidget(
 				"pi-ghost",
 				(_tui, theme) => ({
-					render: () => [theme.fg("accent", "/gpi ") + theme.fg("dim", "is running • run /gpi to bring it back")],
+					render: () => [theme.fg("accent", `/${commandForMode(ghostMode)} `) + theme.fg("dim", `is running • run /${commandForMode(ghostMode)} to bring it back`)],
 					invalidate: () => {},
 				}),
 				{ placement: "aboveEditor" },
@@ -421,24 +442,26 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
-	const ensureGhostSession = async (ctx: ExtensionCommandContext): Promise<AgentSession> => {
+	const ensureGhostSession = async (ctx: ExtensionCommandContext, mode: GhostMode): Promise<AgentSession> => {
 		if (ghostSession) return ghostSession;
 		if (!ctx.model) throw new Error("No model selected");
 
 		const result = await createAgentSession({
 			cwd: ctx.cwd,
 			model: ctx.model,
+			thinkingLevel: pi.getThinkingLevel(),
 			modelRegistry: ctx.modelRegistry,
-			sessionManager: SessionManager.inMemory(ctx.cwd),
+			sessionManager: mode === "fork" ? createForkedSessionManager(ctx) : SessionManager.inMemory(ctx.cwd),
 		});
 		ghostSession = result.session;
+		ghostMode = mode;
 		ghostSessionCwd = ctx.cwd;
 		ghostModelLabel = ctx.model.id;
 		return ghostSession;
 	};
 
-	const openGhostOverlay = async (ctx: ExtensionCommandContext, initialPrompt?: string) => {
-		const session = await ensureGhostSession(ctx);
+	const openGhostOverlay = async (ctx: ExtensionCommandContext, mode: GhostMode, initialPrompt?: string) => {
+		const session = await ensureGhostSession(ctx, mode);
 		overlayClosed = false;
 
 		void ctx.ui
@@ -505,29 +528,43 @@ export default function (pi: ExtensionAPI) {
 			});
 	};
 
+	const handleGhostCommand = async (mode: GhostMode, args: string, ctx: ExtensionCommandContext) => {
+		const command = commandForMode(mode);
+
+		if (!ctx.hasUI) {
+			ctx.ui.notify(`/${command} requires interactive mode`, "error");
+			return;
+		}
+
+		const prompt = args.trim();
+
+		if (overlayHandle) {
+			if (ghostMode !== mode) {
+				ctx.ui.notify(`/${commandForMode(ghostMode)} is already running; close it before starting /${command}`, "warning");
+				return;
+			}
+
+			if (overlayHandle.isHidden()) {
+				setHiddenState(ctx, false);
+			}
+			if (prompt) {
+				const session = await ensureGhostSession(ctx, mode);
+				void session.prompt(prompt, { images: [] });
+			}
+			return;
+		}
+
+		await openGhostOverlay(ctx, mode, prompt || undefined);
+	};
+
 	pi.registerCommand("gpi", {
 		description: "Open ghost pi overlay",
-		handler: async (args, ctx) => {
-			if (!ctx.hasUI) {
-				ctx.ui.notify("/gpi requires interactive mode", "error");
-				return;
-			}
+		handler: async (args, ctx) => handleGhostCommand("blank", args, ctx),
+	});
 
-			const prompt = args.trim();
-
-			if (overlayHandle) {
-				if (overlayHandle.isHidden()) {
-					setHiddenState(ctx, false);
-				}
-				if (prompt) {
-					const session = await ensureGhostSession(ctx);
-					void session.prompt(prompt, { images: [] });
-				}
-				return;
-			}
-
-			await openGhostOverlay(ctx, prompt || undefined);
-		},
+	pi.registerCommand("btw", {
+		description: "Open ghost pi overlay forked from the current session",
+		handler: async (args, ctx) => handleGhostCommand("fork", args, ctx),
 	});
 
 
