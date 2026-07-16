@@ -1,0 +1,30 @@
+{
+  "name": "@ramblurr/brepl-balance",
+  "version": "0.1.0",
+  "description": "Automatically repair unbalanced Clojure delimiters after Pi write and edit tool calls",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "clojure",
+    "brepl"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "balance-after-mutation.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "test": "bun test"
+  }
+}
