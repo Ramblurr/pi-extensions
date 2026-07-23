@@ -1,11 +1,13 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
+  chmodSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   realpathSync,
+  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -14,6 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { open as nodeOpen, readFile as readFileBytes, rename as renameFile } from "node:fs/promises";
 
 const optionalSchema = Symbol("optional-schema");
 type MockSchema = Record<PropertyKey, unknown>;
@@ -60,6 +63,12 @@ mock.module("@earendil-works/pi-ai", () => ({
     return { type: "string", enum: [...values], ...options };
   },
   Type: MockType,
+}));
+
+mock.module("@earendil-works/pi-coding-agent", () => ({
+  async withFileMutationQueue(_path: string, task: () => Promise<unknown>) {
+    return task();
+  },
 }));
 
 const extensionModule = await import("../index.ts");
@@ -241,6 +250,10 @@ function registryFactory(): (() => TestRegistry) | undefined {
 
 interface RuntimeDependencies {
   invokeBabashka: (pi: ExtensionAPI, request: unknown, signal?: AbortSignal) => Promise<unknown>;
+  readFile?: (path: string) => Promise<Uint8Array>;
+  rename?: (source: string, destination: string) => Promise<void>;
+  openFile?: (path: string, flags: string, mode: number) => Promise<unknown>;
+  withFileMutationQueue?: <T>(path: string, task: () => Promise<T>) => Promise<T>;
 }
 
 type RuntimeFactory = (pi: ExtensionAPI, dependencies: RuntimeDependencies) => void;
@@ -270,6 +283,16 @@ async function executeReadTool(
   return await tool.execute("call", parameters, signal, undefined, { cwd }) as Record<string, unknown>;
 }
 
+async function executeEditTool(
+  tool: CapturedTool | undefined,
+  parameters: unknown,
+  cwd: string,
+  signal = new AbortController().signal,
+): Promise<Record<string, unknown>> {
+  if (!tool?.execute) throw new Error("sexp_edit is not registered");
+  return await tool.execute("call", parameters, signal, undefined, { cwd }) as Record<string, unknown>;
+}
+
 function readSuccess(state: unknown, text = "§1 (value)"): unknown {
   return {
     ok: true,
@@ -277,6 +300,64 @@ function readSuccess(state: unknown, text = "§1 (value)"): unknown {
     result: { hash: "must-not-leak", revision: 42, text },
     state,
   };
+}
+
+function editSuccess(state: unknown, candidateSource = "(new)"): unknown {
+  return {
+    ok: true,
+    protocol_version: 1,
+    result: {
+      "applied-edits": 1,
+      "candidate-source": candidateSource,
+      diff: "--- file\n+++ file\n-old\n+new\n",
+      excerpts: "§2 (new)",
+    },
+    state,
+  };
+}
+
+async function instrumentedOpen(
+  path: string,
+  flags: string,
+  mode: number,
+  operations: string[],
+  failAt?: "write" | "sync" | "chmod" | "close",
+): Promise<unknown> {
+  operations.push(`open:${mode.toString(8)}`);
+  const handle = await nodeOpen(path, flags, mode);
+  let closeFailed = false;
+  return {
+    async writeFile(source: string, encoding: string) {
+      operations.push("write");
+      if (failAt === "write") throw new Error("write failed");
+      return handle.writeFile(source, encoding);
+    },
+    async sync() {
+      operations.push("sync");
+      if (failAt === "sync") throw new Error("sync failed");
+      return handle.sync();
+    },
+    async chmod(candidateMode: number) {
+      operations.push(`chmod:${candidateMode.toString(8)}`);
+      if (failAt === "chmod") throw new Error("chmod failed");
+      return handle.chmod(candidateMode);
+    },
+    async close() {
+      operations.push("close");
+      if (failAt === "close") {
+        if (!closeFailed) {
+          closeFailed = true;
+          await handle.close();
+        }
+        throw new Error("close failed");
+      }
+      return handle.close();
+    },
+  };
+}
+
+function task23Ready(): boolean {
+  return typeof (extensionModule as unknown as { atomicReplaceFile?: unknown }).atomicReplaceFile === "function";
 }
 
 describe("package", () => {
@@ -1100,6 +1181,334 @@ describe("package", () => {
         executeReadTool(read, { document: "D2" }, directory),
       ]);
       expect({ maximumActive, queuedCalls }).toEqual({ maximumActive: 2, queuedCalls: 1 });
+    } finally { rmSync(directory, { force: true, recursive: true }); }
+  });
+
+  test("unknown edit documents fail before queue file reads or Babashka", async () => {
+    expect(task23Ready()).toBe(true);
+    if (!task23Ready()) return;
+    let invocations = 0;
+    let queues = 0;
+    let reads = 0;
+    const edit = captureRuntimeTools({
+      async invokeBabashka() { invocations += 1; return editSuccess({}); },
+      async readFile(path) { reads += 1; return readFileBytes(path); },
+      async withFileMutationQueue(_path, task) { queues += 1; return task(); },
+    }).find(({ name }) => name === "sexp_edit");
+    const error = await caught(() => executeEditTool(edit, {
+      document: "D404", edits: [{ operation: "delete", target: "§1" }],
+    }, process.cwd()));
+    expect({
+      code: (error as Error & { code?: string })?.code, invocations, queues, reads,
+    }).toEqual({ code: "unknown-document", invocations: 0, queues: 0, reads: 0 });
+  });
+
+  test("edit lock encloses canonical queue latest read and one complete batch", async () => {
+    expect(task23Ready()).toBe(true);
+    if (!task23Ready()) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-edit-"));
+    try {
+      const path = join(directory, "sample.clj");
+      writeFileSync(path, "(old)");
+      const events: string[] = [];
+      const requests: Array<Record<string, unknown>> = [];
+      let blockQueue = false;
+      let releaseQueue!: () => void;
+      let queueEntered!: () => void;
+      const gate = new Promise<void>((resolve) => { releaseQueue = resolve; });
+      const entered = new Promise<void>((resolve) => { queueEntered = resolve; });
+      const tools = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          const value = request as Record<string, unknown>;
+          requests.push(value);
+          events.push(`invoke:${value.operation}`);
+          return value.operation === "read" ? readSuccess({ open: true }) : editSuccess({ edited: true });
+        },
+        async readFile(file) { events.push("read"); return readFileBytes(file); },
+        async withFileMutationQueue(file, task) {
+          events.push(`queue:${file}`);
+          if (blockQueue) { queueEntered(); await gate; }
+          return task();
+        },
+      });
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      await executeReadTool(read, { path }, directory);
+      writeFileSync(path, "(latest)");
+      events.length = 0;
+      blockQueue = true;
+      const editPromise = executeEditTool(edit, {
+        document: "D1",
+        edits: [
+          { new_form: "(A)", operation: "replace", target: "§1" },
+          { new_form: "(B)", operation: "insert_after", target: "§2" },
+        ],
+      }, directory);
+      await entered;
+      const readPromise = executeReadTool(read, { document: "D1" }, directory);
+      await Bun.sleep(5);
+      const invocationsWhileQueued = requests.length;
+      releaseQueue();
+      await Promise.all([editPromise, readPromise]);
+      const editRequest = requests[1] as Record<string, unknown>;
+      const payload = editRequest.request as Record<string, unknown>;
+      expect({
+        batch: payload.edits,
+        events: events.slice(0, 4),
+        invocationsWhileQueued,
+        queueCanonical: events[0],
+        root: { keys: Object.keys(editRequest).sort(), operation: editRequest.operation, version: editRequest.protocol_version },
+        source: payload.source,
+      }).toEqual({
+        batch: [
+          { new_form: "(A)", operation: "replace", target: "§1" },
+          { new_form: "(B)", operation: "insert_after", target: "§2" },
+        ],
+        events: [`queue:${realpathSync(path)}`, "read", "invoke:edit", "read"],
+        invocationsWhileQueued: 1,
+        queueCanonical: `queue:${realpathSync(path)}`,
+        root: { keys: ["operation", "protocol_version", "request"], operation: "edit", version: 1 },
+        source: "(latest)",
+      });
+    } finally { rmSync(directory, { force: true, recursive: true }); }
+  });
+
+  test("domain conflict writes nothing but commits returned observation state", async () => {
+    expect(task23Ready()).toBe(true);
+    if (!task23Ready()) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-edit-"));
+    try {
+      const path = join(directory, "sample.clj");
+      writeFileSync(path, "(old)");
+      const observed = { observation: "latest" };
+      const requests: Array<Record<string, unknown>> = [];
+      const tools = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          const value = request as Record<string, unknown>;
+          requests.push(value);
+          if (value.operation === "read") return readSuccess(requests.length === 1 ? { open: true } : { after: true });
+          return {
+            error: { code: "batch-conflict", data: {}, message: "conflict" },
+            ok: false, protocol_version: 1, state: observed,
+          };
+        },
+      });
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      await executeReadTool(read, { path }, directory);
+      const error = await caught(() => executeEditTool(edit, {
+        document: "D1", edits: [{ operation: "delete", target: "§1" }],
+      }, directory));
+      await executeReadTool(read, { document: "D1" }, directory);
+      const followup = requests.at(-1)?.request as Record<string, unknown>;
+      expect({
+        code: (error as Error & { code?: string })?.code,
+        file: readFileSync(path, "utf8"),
+        followupState: followup.state,
+        leftovers: readdirSync(directory).filter((name) => name.includes("pi-sexp-edit")),
+      }).toEqual({ code: "batch-conflict", file: "(old)", followupState: observed, leftovers: [] });
+    } finally { rmSync(directory, { force: true, recursive: true }); }
+  });
+
+  test("successful edits atomically replace bytes preserve mode then commit candidate state", async () => {
+    expect(task23Ready()).toBe(true);
+    if (!task23Ready()) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-edit-"));
+    try {
+      const path = join(directory, "sample.clj");
+      writeFileSync(path, "(old)");
+      chmodSync(path, 0o640);
+      const candidateState = { candidate: true };
+      const requests: Array<Record<string, unknown>> = [];
+      const queuePaths: string[] = [];
+      const operations: string[] = [];
+      const tools = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          const value = request as Record<string, unknown>;
+          requests.push(value);
+          return value.operation === "read" ? readSuccess(requests.length === 1 ? { open: true } : { after: true }) : editSuccess(candidateState);
+        },
+        async openFile(file, flags, mode) {
+          return instrumentedOpen(file, flags, mode, operations);
+        },
+        async rename(source, destination) {
+          operations.push("rename");
+          return renameFile(source, destination);
+        },
+        async withFileMutationQueue(file, task) { queuePaths.push(file); return task(); },
+      });
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      await executeReadTool(read, { path }, directory);
+      const result = await executeEditTool(edit, {
+        document: "D1", edits: [{ new_form: "(new)", operation: "replace", target: "§1" }],
+      }, directory);
+      await executeReadTool(read, { document: "D1" }, directory);
+      const followup = requests.at(-1)?.request as Record<string, unknown>;
+      expect({
+        file: readFileSync(path, "utf8"),
+        mode: statSync(path).mode & 0o777,
+        queuePaths,
+        operations,
+        resultText: result.content,
+        stateAfterRename: followup.state,
+        tempFiles: readdirSync(directory).filter((name) => name.includes("pi-sexp-edit")),
+      }).toEqual({
+        file: "(new)", mode: 0o640, queuePaths: [realpathSync(path)],
+        operations: ["open:600", "write", "sync", "chmod:640", "close", "rename"],
+        resultText: [{ type: "text", text: "--- file\n+++ file\n-old\n+new\n\n§2 (new)" }],
+        stateAfterRename: candidateState, tempFiles: [],
+      });
+    } finally { rmSync(directory, { force: true, recursive: true }); }
+  });
+
+  test("rename failure cleans candidate and leaves file and state uncommitted", async () => {
+    expect(task23Ready()).toBe(true);
+    if (!task23Ready()) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-edit-"));
+    try {
+      const path = join(directory, "sample.clj");
+      writeFileSync(path, "(old)");
+      const oldState = { open: true };
+      const candidateState = { candidate: true };
+      const requests: Array<Record<string, unknown>> = [];
+      let renamePaths: string[] = [];
+      const tools = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          const value = request as Record<string, unknown>; requests.push(value);
+          return value.operation === "read" ? readSuccess(requests.length === 1 ? oldState : { after: true }) : editSuccess(candidateState);
+        },
+        async rename(source, destination) { renamePaths = [source, destination]; throw new Error("rename failed"); },
+      });
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      await executeReadTool(read, { path }, directory);
+      const error = await caught(() => executeEditTool(edit, {
+        document: "D1", edits: [{ new_form: "(new)", operation: "replace", target: "§1" }],
+      }, directory));
+      await executeReadTool(read, { document: "D1" }, directory);
+      const followup = requests.at(-1)?.request as Record<string, unknown>;
+      expect({
+        error: error?.message,
+        file: readFileSync(path, "utf8"),
+        sameDirectory: dirname(renamePaths[0] ?? "") === dirname(path),
+        state: followup.state,
+        tempFiles: readdirSync(directory).filter((name) => name.includes("pi-sexp-edit")),
+      }).toEqual({
+        error: "rename failed", file: "(old)", sameDirectory: true, state: oldState, tempFiles: [],
+      });
+    } finally { rmSync(directory, { force: true, recursive: true }); }
+  });
+
+  test("post-observation edit failures commit state except parse-error", async () => {
+    expect(task23Ready()).toBe(true);
+    if (!task23Ready()) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-edit-"));
+    try {
+      const path = join(directory, "sample.clj");
+      writeFileSync(path, "(old)");
+      const oldState = { observation: "old" };
+      const states = ["invalid-form", "repair-failed", "invalid-candidate"].map((code) => ({ observation: code }));
+      const failures = [
+        ...states.map((state, index) => ({
+          error: { code: ["invalid-form", "repair-failed", "invalid-candidate"][index], data: {}, message: "failure" },
+          ok: false, protocol_version: 1, state,
+        })),
+        { error: { code: "parse-error", data: {}, message: "malformed current" }, ok: false, protocol_version: 1, state: { observation: "poison" } },
+        { error: { code: "invalid-form", data: {}, message: "final" }, ok: false, protocol_version: 1, state: states[2] },
+      ];
+      const requests: Array<Record<string, unknown>> = [];
+      const tools = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          const value = request as Record<string, unknown>; requests.push(value);
+          return value.operation === "read" ? readSuccess(oldState) : failures.shift();
+        },
+      });
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      await executeReadTool(read, { path }, directory);
+      for (let index = 0; index < 5; index += 1) {
+        await caught(() => executeEditTool(edit, {
+          document: "D1", edits: [{ operation: "delete", target: "§1" }],
+        }, directory));
+      }
+      const sentStates = requests
+        .filter(({ operation }) => operation === "edit")
+        .map(({ request }) => (request as Record<string, unknown>).state);
+      expect(sentStates).toEqual([oldState, states[0], states[1], states[2], states[2]]);
+    } finally { rmSync(directory, { force: true, recursive: true }); }
+  });
+
+  test("write sync chmod and close failures always clean and never commit state", async () => {
+    expect(task23Ready()).toBe(true);
+    if (!task23Ready()) return;
+    const root = mkdtempSync(join(tmpdir(), "pi-sexp-edit-"));
+    try {
+      const results: Record<string, unknown> = {};
+      for (const stage of ["write", "sync", "chmod", "close"] as const) {
+        const directory = join(root, stage);
+        mkdirSync(directory);
+        const path = join(directory, "sample.clj");
+        writeFileSync(path, "(old)");
+        const oldState = { stage: "old" };
+        const requests: Array<Record<string, unknown>> = [];
+        const operations: string[] = [];
+        const tools = captureRuntimeTools({
+          async invokeBabashka(_pi, request) {
+            const value = request as Record<string, unknown>; requests.push(value);
+            return value.operation === "read"
+              ? readSuccess(requests.length === 1 ? oldState : { after: true })
+              : editSuccess({ stage: "candidate" });
+          },
+          async openFile(file, flags, mode) {
+            return instrumentedOpen(file, flags, mode, operations, stage);
+          },
+        });
+        const read = tools.find(({ name }) => name === "sexp_read");
+        const edit = tools.find(({ name }) => name === "sexp_edit");
+        await executeReadTool(read, { path }, directory);
+        await caught(() => executeEditTool(edit, {
+          document: "D1", edits: [{ new_form: "(new)", operation: "replace", target: "§1" }],
+        }, directory));
+        await executeReadTool(read, { document: "D1" }, directory);
+        results[stage] = {
+          clean: readdirSync(directory).every((name) => !name.includes("pi-sexp-edit")),
+          file: readFileSync(path, "utf8"),
+          operations,
+          state: (requests.at(-1)?.request as Record<string, unknown>).state,
+        };
+      }
+      expect(results).toEqual({
+        write: { clean: true, file: "(old)", operations: ["open:600", "write", "close"], state: { stage: "old" } },
+        sync: { clean: true, file: "(old)", operations: ["open:600", "write", "sync", "close"], state: { stage: "old" } },
+        chmod: { clean: true, file: "(old)", operations: ["open:600", "write", "sync", "chmod:644", "close"], state: { stage: "old" } },
+        close: { clean: true, file: "(old)", operations: ["open:600", "write", "sync", "chmod:644", "close", "close"], state: { stage: "old" } },
+      });
+    } finally { rmSync(root, { force: true, recursive: true }); }
+  });
+
+  test("near-NAME_MAX targets use a short same-directory temporary basename", async () => {
+    expect(task23Ready()).toBe(true);
+    if (!task23Ready()) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-edit-"));
+    try {
+      const path = join(directory, `${"x".repeat(240)}.clj`);
+      writeFileSync(path, "(old)");
+      const tools = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          return (request as Record<string, unknown>).operation === "read"
+            ? readSuccess({ open: true })
+            : editSuccess({ candidate: true });
+        },
+      });
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      await executeReadTool(read, { path }, directory);
+      const error = await caught(() => executeEditTool(edit, {
+        document: "D1", edits: [{ new_form: "(new)", operation: "replace", target: "§1" }],
+      }, directory));
+      expect({ error: error?.message ?? null, file: readFileSync(path, "utf8") })
+        .toEqual({ error: null, file: "(new)" });
     } finally { rmSync(directory, { force: true, recursive: true }); }
   });
 });

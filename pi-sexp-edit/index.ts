@@ -1,6 +1,21 @@
 import { StringEnum, Type, type Static } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { chmod, mkdtemp, readFile as readFileBytes, realpath, rm, stat, writeFile } from "node:fs/promises";
+import {
+  withFileMutationQueue as queueFileMutation,
+  type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
+import {
+  chmod,
+  mkdtemp,
+  open as openFile,
+  readFile as readFileBytes,
+  realpath,
+  rename as renameFile,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -382,7 +397,12 @@ const editDescription =
 
 export interface SexpExtensionDependencies {
   invokeBabashka: typeof invokeBabashka;
+  openFile: typeof openFile;
   readFile(path: string): Promise<Uint8Array>;
+  rename(source: string, destination: string): Promise<void>;
+  stat: typeof stat;
+  unlink(path: string): Promise<void>;
+  withFileMutationQueue<T>(path: string, task: () => Promise<T>): Promise<T>;
 }
 
 export class SexpDomainError extends Error {
@@ -401,10 +421,66 @@ export class SexpDomainError extends Error {
 
 const defaultDependencies: SexpExtensionDependencies = {
   invokeBabashka,
+  openFile,
   readFile: readFileBytes,
+  rename: renameFile,
+  stat,
+  unlink,
+  withFileMutationQueue: queueFileMutation,
 };
 
 const observationFailureCodes = new Set(["ambiguous", "changed", "deleted", "unknown"]);
+const editObservationFailureCodes = new Set([
+  "ambiguous",
+  "batch-conflict",
+  "invalid-candidate",
+  "invalid-form",
+  "repair-failed",
+  "changed",
+  "deleted",
+  "unknown",
+]);
+
+function decodeSource(bytes: Uint8Array): string {
+  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+}
+
+async function removeTemporaryFile(
+  path: string,
+  dependencies: Pick<SexpExtensionDependencies, "unlink">,
+): Promise<void> {
+  try {
+    await dependencies.unlink(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+export async function atomicReplaceFile(
+  path: string,
+  candidateSource: string,
+  mode: number,
+  dependencyOverrides: Partial<SexpExtensionDependencies> = {},
+): Promise<void> {
+  const dependencies = { ...defaultDependencies, ...dependencyOverrides };
+  const temporaryPath = join(dirname(path), `.pi-sexp-edit-${randomUUID()}.tmp`);
+  let handle: Awaited<ReturnType<typeof openFile>> | undefined;
+  try {
+    handle = await dependencies.openFile(temporaryPath, "wx", 0o600);
+    await handle.writeFile(candidateSource, "utf8");
+    await handle.sync();
+    await handle.chmod(mode);
+    await handle.close();
+    handle = undefined;
+    await dependencies.rename(temporaryPath, path);
+  } finally {
+    try {
+      if (handle) await handle.close();
+    } finally {
+      await removeTemporaryFile(temporaryPath, dependencies);
+    }
+  }
+}
 
 function unwired(toolName: string, _documents: DocumentRegistry): never {
   throw new Error(`${toolName} execution is not wired yet`);
@@ -429,7 +505,7 @@ export function createSexpExtension(
 
       return record.lock.run(async () => {
         const bytes = await dependencies.readFile(record.canonicalPath);
-        const source = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+        const source = decodeSource(bytes);
         const payload: Record<string, unknown> = {
           "canonical-path": record.canonicalPath,
           depth: parameters.depth ?? ("target" in parameters ? 2 : 0),
@@ -471,8 +547,78 @@ export function createSexpExtension(
     label: "S-expression Edit",
     description: editDescription,
     parameters: sexpEditSchema,
-    async execute() {
-      return unwired("sexp_edit", documents);
+    async execute(_toolCallId, parameters, signal) {
+      const record = documents.getDocument(parameters.document);
+      if (record.state === undefined) {
+        throw new DocumentRegistryError(
+          "unknown-document",
+          `Document has no valid open state: ${parameters.document}`,
+        );
+      }
+
+      return record.lock.run(() =>
+        dependencies.withFileMutationQueue(record.canonicalPath, async () => {
+          const bytes = await dependencies.readFile(record.canonicalPath);
+          const source = decodeSource(bytes);
+          const metadata = await dependencies.stat(record.canonicalPath);
+          const envelope = await dependencies.invokeBabashka(
+            pi,
+            {
+              operation: "edit",
+              protocol_version: 1,
+              request: {
+                "canonical-path": record.canonicalPath,
+                "document-id": record.documentId,
+                edits: parameters.edits,
+                source,
+                state: record.state,
+              },
+            },
+            signal,
+          );
+
+          if (!envelope.ok) {
+            if (editObservationFailureCodes.has(envelope.error.code)) {
+              if (!isRecord(envelope.state)) {
+                invalidProtocol("edit observation state must be an object");
+              }
+              record.state = envelope.state;
+            }
+            throw new SexpDomainError(envelope.error, envelope.state);
+          }
+          if (!isRecord(envelope.state)) invalidProtocol("edit state must be an object");
+          const candidateSource = envelope.result["candidate-source"];
+          if (typeof candidateSource !== "string") {
+            invalidProtocol("candidate source must be a string");
+          }
+          const diff = envelope.result.diff;
+          const excerpts = envelope.result.excerpts;
+          if (typeof diff !== "string" || typeof excerpts !== "string") {
+            invalidProtocol("edit diff and excerpts must be strings");
+          }
+
+          const output = diff.length === 0
+            ? excerpts
+            : excerpts.length === 0
+              ? diff
+              : `${diff}${diff.endsWith("\n") ? "\n" : "\n\n"}${excerpts}`;
+
+          await atomicReplaceFile(
+            record.canonicalPath,
+            candidateSource,
+            metadata.mode & 0o7777,
+            dependencies,
+          );
+          record.state = envelope.state;
+          return {
+            content: [{
+              type: "text" as const,
+              text: output,
+            }],
+            details: { document: record.documentId },
+          };
+        }),
+      );
     },
   });
 }

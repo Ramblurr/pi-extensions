@@ -115,12 +115,17 @@
   - Validation: full Clojure suite 182 tests / 508 assertions; Bun 23 tests; whitespace and newline checks pass.
   - Review: Pi Link review against `fad1b65` found one Important canonical symlink extension bypass and one Minor base-36 proof gap; both were fixed tests-first, and follow-up review found no remaining findings.
 - [x] Task 22: Wire `sexp_read` through the registry and Babashka
-  - Commit: `read: wire sexp_read through babashka` (this task's commit)
+  - Commit: `16c49bf read: wire sexp_read through babashka`
   - Notes: Added byte-safe latest-source reads, strict read protocol requests, path/open/refresh/target dispatch, lock-scoped execution, conditional defaults, observation-state commits, and annotated public results.
   - TDD: RED was 5 behavior failures / 0 errors; GREEN is 30 Bun tests / 48 assertions after target-retirement, fatal-UTF-8, and root-protocol review regressions.
   - Validation: full Clojure suite 182 tests / 508 assertions; Bun 30 tests; real Babashka annotated-read probe, whitespace, and newline checks pass.
   - Review: Pi Link review against `2a4b1c4` found one Critical target-state resurrection path, one Important lossy UTF-8 decode, and one Minor protocol assertion gap; all were fixed tests-first, and follow-up review found no remaining findings.
-- [ ] Task 23: Add queued atomic `sexp_edit` file replacement
+- [x] Task 23: Add queued atomic `sexp_edit` file replacement
+  - Commit: `edit: add queued atomic file replacement` (this task's commit)
+  - Notes: Added lock-and-mutation-queue edit windows, latest byte-safe source reads, one-batch Babashka transforms, selective observation-state commits, private short-name atomic candidates, permission preservation, and post-rename candidate-state commits.
+  - TDD: Initial RED was 5 behavior failures / 0 errors; GREEN is 38 Bun tests / 64 assertions after observation-code, atomic-stage, cleanup, private-mode, ordering, and NAME_MAX review regressions.
+  - Validation: full Clojure suite 182 tests / 508 assertions; Bun 38 tests; real read→external-comment→edit probe preserved the external text, mode 0640, extension-only diff, and new §2 handle; whitespace/newline checks pass.
+  - Review: Pi Link review against `16c49bf` found one Critical omitted observation-state class, two Important atomic cleanup/name issues, and one Minor temporary-mode exposure; all were fixed tests-first, and follow-up review found no remaining findings.
 - [ ] Task 24: Format bounded results and structured errors
 - [ ] Task 25: Harden cancellation, timeout, concurrency, and write failures
 - [ ] Task 26: Add read and reconciliation acceptance workflows
