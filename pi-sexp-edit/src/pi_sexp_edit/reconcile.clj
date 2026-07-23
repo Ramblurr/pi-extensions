@@ -399,25 +399,180 @@
     old-entry
     current-entry)))
 
-(defn reconcile [old-document current-document]
-  (let [old-root     (parse/node-at-path old-document [])
-        current-root (parse/node-at-path current-document [])
-        empty-result {:pairs {}
-                      :statuses {}}]
-    (cond
-      (= (:concrete-hash old-root) (:concrete-hash current-root))
-      (pair-equal-subtree empty-result
-                          old-document
-                          current-document
-                          old-root
-                          current-root)
+(def ^:private lifecycle-statuses
+  #{:ambiguous :changed :deleted :preserved})
 
-      (compatible-container? old-root current-root)
-      (pair-changed-container empty-result
-                              old-document
-                              current-document
-                              old-root
-                              current-root)
+(defn- baseline-manifest-error [reason handle manifest baseline-entry]
+  (ex-info "Invalid opaque handle state"
+           (cond-> {:code   :internal-state-error
+                    :handle handle
+                    :path   (:path manifest)
+                    :reason reason}
+             baseline-entry
+             (assoc :baseline-concrete-hash (:concrete-hash baseline-entry)
+                    :baseline-node-tag (:tag baseline-entry)))))
+
+(defn- verify-active-manifests! [old-document active-handles]
+  (doseq [[handle manifest] (sort-by key active-handles)]
+    (let [baseline-entry (parse/node-at-path old-document (:path manifest))]
+      (cond
+        (nil? baseline-entry)
+        (throw (baseline-manifest-error :baseline-path-not-found
+                                        handle
+                                        manifest
+                                        nil))
+
+        (not= (:concrete-hash manifest) (:concrete-hash baseline-entry))
+        (throw (baseline-manifest-error :baseline-concrete-hash-mismatch
+                                        handle
+                                        manifest
+                                        baseline-entry))
+
+        (not= (:node-tag manifest) (:tag baseline-entry))
+        (throw (baseline-manifest-error :baseline-node-tag-mismatch
+                                        handle
+                                        manifest
+                                        baseline-entry)))))
+  active-handles)
+
+(defn- paired-child-anchors [result old-children current-children]
+  (let [current-index-by-path (into {}
+                                    (map-indexed (fn [index entry]
+                                                   [(:path entry) index]))
+                                    current-children)]
+    (into []
+          (keep-indexed
+           (fn [old-index old-entry]
+             (when-let [current-path (get-in result
+                                             [:pairs
+                                              (:path old-entry)
+                                              :current-path])]
+               (when-some [current-index
+                           (get current-index-by-path current-path)]
+                 [old-index current-index]))))
+          old-children)))
+
+(defn- monotonic-child-anchors? [result old-children current-children]
+  (let [anchors (paired-child-anchors result old-children current-children)]
+    (or (<= (count anchors) 1)
+        (apply < (map second anchors)))))
+
+(defn- local-unpaired-status
+  [old-document current-document result old-entry current-parent-path]
+  (let [old-children       (parse/structural-children
+                            old-document
+                            (:parent-path old-entry))
+        current-children   (parse/structural-children current-document
+                                                      current-parent-path)
+        paired-current     (into #{}
+                                 (map (comp :current-path val))
+                                 (:pairs result))
+        unpaired-old       (remove #(contains? (:pairs result) (:path %))
+                                   old-children)
+        unpaired-current   (remove #(contains? paired-current (:path %))
+                                   current-children)
+        same-tag-old       (filter #(= (:tag old-entry) (:tag %))
+                                   unpaired-old)
+        same-tag-current   (filter #(= (:tag old-entry) (:tag %))
+                                   unpaired-current)
+        current-by-edge    (into {} (map (juxt edge identity))
+                                 unpaired-current)
+        same-edge-current  (get current-by-edge (edge old-entry))
+        monotonic?         (monotonic-child-anchors? result
+                                                     old-children
+                                                     current-children)]
+    (cond
+      (and monotonic?
+           (= 1 (count same-tag-old))
+           (= 1 (count same-tag-current))
+           (= same-edge-current (first same-tag-current)))
+      :changed
+
+      (seq same-tag-current)
+      :ambiguous
 
       :else
-      empty-result)))
+      :deleted)))
+
+(defn- completed-path-status
+  [old-document current-document result old-path]
+  (if (contains? (:statuses result) old-path)
+    (get-in result [:statuses old-path])
+    (let [old-entry           (parse/node-at-path old-document old-path)
+          parent-path         (:parent-path old-entry)
+          current-parent-path (get-in result
+                                      [:pairs parent-path :current-path])]
+      (if current-parent-path
+        (local-unpaired-status old-document
+                               current-document
+                               result
+                               old-entry
+                               current-parent-path)
+        (if (= :ambiguous
+               (completed-path-status old-document
+                                      current-document
+                                      result
+                                      parent-path))
+          :ambiguous
+          :deleted)))))
+
+(defn- active-handle-statuses
+  [old-document current-document result active-handles]
+  (into {}
+        (map (fn [[handle manifest]]
+               (let [status (completed-path-status old-document
+                                                   current-document
+                                                   result
+                                                   (:path manifest))]
+                 (when-not (contains? lifecycle-statuses status)
+                   (throw (ex-info "Invalid reconciliation lifecycle status"
+                                   {:code   :internal-state-error
+                                    :handle handle
+                                    :reason :invalid-lifecycle-status
+                                    :status status})))
+                 [handle status])))
+        (sort-by key active-handles)))
+
+(defn- add-active-path-statuses [result active-handles handle-statuses]
+  (reduce (fn [next-result [handle manifest]]
+            (assoc-in next-result
+                      [:statuses (:path manifest)]
+                      (get handle-statuses handle)))
+          result
+          (sort-by key active-handles)))
+
+(defn reconcile
+  ([old-document current-document]
+   (let [old-root     (parse/node-at-path old-document [])
+         current-root (parse/node-at-path current-document [])
+         empty-result {:pairs {}
+                       :statuses {}}]
+     (cond
+       (= (:concrete-hash old-root) (:concrete-hash current-root))
+       (pair-equal-subtree empty-result
+                           old-document
+                           current-document
+                           old-root
+                           current-root)
+
+       (compatible-container? old-root current-root)
+       (pair-changed-container empty-result
+                               old-document
+                               current-document
+                               old-root
+                               current-root)
+
+       :else
+       empty-result)))
+  ([old-document current-document active-handles]
+   (verify-active-manifests! old-document active-handles)
+   (let [result          (reconcile old-document current-document)
+         handle-statuses (active-handle-statuses old-document
+                                                 current-document
+                                                 result
+                                                 active-handles)]
+     (assoc (add-active-path-statuses result
+                                      active-handles
+                                      handle-statuses)
+            :handle-statuses
+            handle-statuses))))

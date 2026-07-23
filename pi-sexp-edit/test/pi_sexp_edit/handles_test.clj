@@ -287,3 +287,310 @@
             :reason :invalid-state-field
             :field :next-handle-id}
            (select-keys error [:code :reason :field])))))
+
+(deftest decoder-rejects-impossible-issued-history
+  (let [[active handle] (sut/allocate-handle (initial-state "D1")
+                                             (synthetic-entry 0))
+        manifest        (get-in active [:handles handle])
+        retired         (sut/retire-handle active handle :changed)
+        zero-manifest   (assoc manifest :handle "§0")
+        cases           [{:reason :invalid-handle-manifest
+                          :state  (assoc-in retired
+                                            [:retired-handles handle :reason]
+                                            :preserved)}
+                         {:reason :invalid-handle-ledger
+                          :state  (assoc active :next-handle-id 3)}
+                         {:reason :invalid-handle-ledger
+                          :state  (assoc (initial-state "D1")
+                                         :handles
+                                         {"§0" zero-manifest})}]]
+    (is (= (mapv (fn [{:keys [reason]}]
+                   {:code   :internal-state-error
+                    :reason reason})
+                 cases)
+           (mapv (fn [{:keys [state]}]
+                   (select-keys
+                    (decode-error (json/generate-string state))
+                    [:code :reason]))
+                 cases)))))
+
+(defn- entry-with-source [document source]
+  (first (filter #(and (:structural? %)
+                       (= source (:source %)))
+                 (:nodes document))))
+
+(defn- reconcile-document-state [state current-source]
+  (sut/reconcile-state state current-source))
+
+(defn- reconcile-state-error [state current-source]
+  (try
+    (reconcile-document-state state current-source)
+    nil
+    (catch Exception exception
+      (ex-data exception))))
+
+(deftest reconciliation-applies-every-active-lifecycle-outcome-once
+  (let [old-source     (str "(defn stable [] (keep))\n"
+                            "(defn changing [] :old)\n"
+                            "(defn deleted [] (gone))\n"
+                            "(def duplicates [(same) (same)])")
+        current-source (str "(defn stable [] (keep))\n"
+                            "(defn changing [] :new)\n"
+                            "(def duplicates [(same) (same) (same)])")
+        old            (parse/parse-source old-source {:document-id "D1"})
+        entries        (mapv #(entry-with-source old %)
+                             ["(defn stable [] (keep))"
+                              "(defn changing [] :old)"
+                              "(defn deleted [] (gone))"
+                              "(same)"])
+        [state handles] (allocate-all (initial-state "D1" old-source)
+                                      entries)
+        [stable changing deleted ambiguous] handles
+        {:keys [reconciliation state]}
+        (reconcile-document-state state current-source)]
+    (is (= {:active-handles   #{stable}
+            :baseline-source current-source
+            :handle-statuses {stable    :preserved
+                              changing  :changed
+                              deleted   :deleted
+                              ambiguous :ambiguous}
+            :next-handle-id   5
+            :retired-reasons {ambiguous :ambiguous
+                              changing  :changed
+                              deleted   :deleted}}
+           {:active-handles   (set (keys (:handles state)))
+            :baseline-source (:baseline-source state)
+            :handle-statuses (:handle-statuses reconciliation)
+            :next-handle-id   (:next-handle-id state)
+            :retired-reasons (update-vals (:retired-handles state)
+                                          :reason)}))))
+
+(deftest preserved-descendant-follows-its-unique-current-occurrence
+  (let [old-source     (str "(defn calculate [x]\n"
+                            "  (audit :old)\n"
+                            "  (+ x 1))\n"
+                            "(defn supporting [] :same)")
+        current-source (str "(defn inserted [] :new)\n"
+                            "(defn calculate [x]\n"
+                            "  (audit :new)\n"
+                            "  (+ x 1))\n"
+                            "(defn supporting [] :same)")
+        old            (parse/parse-source old-source {:document-id "D1"})
+        current        (parse/parse-source current-source
+                                           {:document-id "D1"})
+        old-function   (entry-with-source
+                        old
+                        (str "(defn calculate [x]\n"
+                             "  (audit :old)\n"
+                             "  (+ x 1))"))
+        old-sum        (entry-with-source old "(+ x 1)")
+        current-sum    (entry-with-source current "(+ x 1)")
+        [state [function-handle sum-handle]]
+        (allocate-all (initial-state "D1" old-source)
+                      [old-function old-sum])
+        transitioned   (:state (reconcile-document-state state
+                                                         current-source))
+        sum-manifest   (sut/resolve-handle transitioned sum-handle)]
+    (is (= {:active-sum     {:concrete-hash (:concrete-hash current-sum)
+                             :node-tag     (:tag current-sum)
+                             :path         (:path current-sum)
+                             :status       :active}
+            :function-reason :changed
+            :old-path-changed? true}
+           {:active-sum     (select-keys sum-manifest
+                                         [:concrete-hash
+                                          :node-tag
+                                          :path
+                                          :status])
+            :function-reason (get-in transitioned
+                                     [:retired-handles
+                                      function-handle
+                                      :reason])
+            :old-path-changed? (not= (:path old-sum)
+                                     (:path sum-manifest))}))))
+
+(deftest deletion-retires-the-target-and-every-issued-descendant
+  (let [old-source      "(wrapper (target x))"
+        old             (parse/parse-source old-source {:document-id "D1"})
+        entries         (mapv #(entry-with-source old %)
+                              [old-source "(target x)" "x"])
+        [state handles] (allocate-all (initial-state "D1" old-source)
+                                      entries)
+        result          (reconcile-document-state state "")
+        transitioned    (:state result)]
+    (is (= {:active           {}
+            :handle-statuses (zipmap handles (repeat :deleted))
+            :retired-reasons (zipmap handles (repeat :deleted))}
+           {:active           (:handles transitioned)
+            :handle-statuses (get-in result
+                                     [:reconciliation :handle-statuses])
+            :retired-reasons (update-vals (:retired-handles transitioned)
+                                          :reason)}))))
+
+(deftest ambiguous-occurrences-retire-without-allocation
+  (let [old-source     "(def duplicates [(same) (same)])"
+        current-source "(def duplicates [(same) (same) (same)])"
+        old            (parse/parse-source old-source {:document-id "D1"})
+        duplicates     (filterv #(and (:structural? %)
+                                      (= "(same)" (:source %)))
+                                (:nodes old))
+        [state handles] (allocate-all (initial-state "D1" old-source)
+                                      duplicates)
+        transitioned   (:state (reconcile-document-state state
+                                                         current-source))]
+    (is (= {:active           {}
+            :baseline-source current-source
+            :next-handle-id  3
+            :retired-reasons (zipmap handles (repeat :ambiguous))
+            :total-issued     2}
+           {:active           (:handles transitioned)
+            :baseline-source (:baseline-source transitioned)
+            :next-handle-id  (:next-handle-id transitioned)
+            :retired-reasons (update-vals (:retired-handles transitioned)
+                                          :reason)
+            :total-issued     (+ (count (:handles transitioned))
+                                 (count (:retired-handles transitioned)))}))))
+
+(deftest trivia-only-edits-retire-containers-but-preserve-child-handles
+  (let [cases [{:current "(wrapper (stable) ; new\n  (other))"
+                :name    "comment-only"
+                :old     "(wrapper (stable) ; old\n  (other))"}
+               {:current "(wrapper  (stable) (other))"
+                :name    "whitespace-only"
+                :old     "(wrapper (stable) (other))"}]]
+    (doseq [{:keys [current name old]} cases]
+      (testing name
+        (let [old-document (parse/parse-source old {:document-id "D1"})
+              current-document (parse/parse-source current
+                                                   {:document-id "D1"})
+              container    (entry-with-source old-document old)
+              child        (entry-with-source old-document "(stable)")
+              current-child (entry-with-source current-document "(stable)")
+              [state [container-handle child-handle]]
+              (allocate-all (initial-state "D1" old) [container child])
+              transitioned (:state (reconcile-document-state state current))
+              child-manifest (sut/resolve-handle transitioned child-handle)]
+          (is (= {:child          {:concrete-hash (:concrete-hash current-child)
+                                   :path          (:path current-child)
+                                   :status        :active}
+                  :container-reason :changed}
+                 {:child          (select-keys child-manifest
+                                               [:concrete-hash :path :status])
+                  :container-reason (get-in transitioned
+                                            [:retired-handles
+                                             container-handle
+                                             :reason])})))))))
+
+(deftest reconciliation-validates-required-and-baseline-state
+  (let [source           "(target)"
+        document         (parse/parse-source source {:document-id "D1"})
+        entry            (entry-with-source document source)
+        [state [handle]] (allocate-all (initial-state "D1" source) [entry])
+        retired          (sut/retire-handle state handle :changed)
+        cases            [{:reason :invalid-state-field
+                           :state  (dissoc state :baseline-source)}
+                          {:reason :invalid-handle-manifest
+                           :state  (assoc-in state
+                                             [:handles handle :status]
+                                             :retired)}
+                          {:reason :baseline-path-not-found
+                           :state  (assoc-in state
+                                             [:handles handle :path]
+                                             [{:role :top-level
+                                               :index 42}])}
+                          {:reason :baseline-concrete-hash-mismatch
+                           :state  (assoc-in state
+                                             [:handles handle :concrete-hash]
+                                             (apply str (repeat 64 "0")))}
+                          {:reason :baseline-node-tag-mismatch
+                           :state  (assoc-in state
+                                             [:handles handle :node-tag]
+                                             :vector)}
+                          {:reason :invalid-baseline-source
+                           :state  (assoc state :baseline-source "(")}
+                          {:reason :invalid-handle-manifest
+                           :state  (assoc-in retired
+                                             [:retired-handles handle :reason]
+                                             :preserved)}
+                          {:reason :invalid-handle-ledger
+                           :state  (assoc state :next-handle-id 3)}]]
+    (is (= (mapv (fn [{:keys [reason]}]
+                   {:code   :internal-state-error
+                    :reason reason})
+                 cases)
+           (mapv (fn [{:keys [state]}]
+                   (select-keys (reconcile-state-error state source)
+                                [:code :reason]))
+                 cases)))))
+
+(deftest retired-handles-never-rebind-when-identical-text-reappears
+  (let [source              "(target)"
+        document            (parse/parse-source source {:document-id "D1"})
+        entry               (entry-with-source document source)
+        [state [old-handle]] (allocate-all (initial-state "D1" source)
+                                           [entry])
+        deleted-state       (:state (reconcile-document-state state ""))
+        reappeared-result   (reconcile-document-state deleted-state source)
+        reappeared-state    (:state reappeared-result)
+        current-entry       (entry-with-source
+                             (parse/parse-source source
+                                                 {:document-id "D1"})
+                             source)
+        [rendered-state new-handle] (sut/allocate-handle reappeared-state
+                                                         current-entry)]
+    (is (= {:active-before-render {}
+            :new-handle           "§2"
+            :old-reason           :deleted
+            :old-resolves?        false
+            :reconciliation       {}
+            :retired-after-render #{old-handle}}
+           {:active-before-render (:handles reappeared-state)
+            :new-handle           new-handle
+            :old-reason           (get-in rendered-state
+                                          [:retired-handles
+                                           old-handle
+                                           :reason])
+            :old-resolves?        (some? (sut/resolve-handle rendered-state
+                                                             old-handle))
+            :reconciliation       (get-in reappeared-result
+                                          [:reconciliation
+                                           :handle-statuses])
+            :retired-after-render (set (keys (:retired-handles
+                                              rendered-state)))}))))
+
+(deftest reconciliation-is-deterministic-and-produces-valid-opaque-state
+  (let [old-source      "(wrapper (stable) :old)"
+        current-source  "(wrapper (stable) :new)"
+        old             (parse/parse-source old-source {:document-id "D1"})
+        entries         [(entry-with-source old old-source)
+                         (entry-with-source old "(stable)")]
+        [state _handles] (allocate-all (initial-state "D1" old-source)
+                                       entries)
+        results          (mapv (fn [_iteration]
+                                 (reconcile-document-state state
+                                                           current-source))
+                               (range 5))
+        transitioned     (:state (first results))]
+    (is (= (vec (repeat 5 (first results))) results))
+    (is (= transitioned
+           (sut/json->state (sut/state->json transitioned))))
+    (is (= current-source (:baseline-source transitioned)))
+    (is (nil? (:missing? (first results))))))
+
+(deftest changed-atom-retires-with-a-changed-reason
+  (let [old-source      "(wrapper old)"
+        current-source  "(wrapper new)"
+        old             (parse/parse-source old-source {:document-id "D1"})
+        old-atom        (entry-with-source old "old")
+        [state [handle]] (allocate-all (initial-state "D1" old-source)
+                                       [old-atom])
+        result           (reconcile-document-state state current-source)
+        transitioned     (:state result)]
+    (is (= {:active           {}
+            :handle-statuses {handle :changed}
+            :retired-reason  :changed}
+           {:active           (:handles transitioned)
+            :handle-statuses (get-in result
+                                     [:reconciliation :handle-statuses])
+            :retired-reason  (get-in transitioned
+                                     [:retired-handles handle :reason])}))))

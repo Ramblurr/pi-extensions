@@ -1,6 +1,7 @@
 (ns pi-sexp-edit.reconcile-test
   (:require
    [clojure.test :refer [deftest is testing]]
+   [pi-sexp-edit.handles :as handles]
    [pi-sexp-edit.parse :as parse]
    [pi-sexp-edit.reconcile :as sut]))
 
@@ -674,3 +675,92 @@
                                  :status   (get-in result
                                                    [:statuses
                                                     (:path old-wrapper)])}}))))
+
+(defn- issue-entries [document entries]
+  (reduce
+   (fn [[state issued] entry]
+     (let [[next-state handle] (handles/allocate-handle state entry)]
+       [next-state (conj issued handle)]))
+   [(handles/initial-state "D1"
+                           "/workspace/D1/example.clj"
+                           (:source document))
+    []]
+   entries))
+
+(defn- active-reconciliation-error [old current active-handles]
+  (try
+    (sut/reconcile old current active-handles)
+    nil
+    (catch Exception exception
+      (ex-data exception))))
+
+(deftest active-handles-receive-one-final-lifecycle-status
+  (let [cases [{:current  "(target)"
+                :expected :preserved
+                :old      "(target)"
+                :target   "(target)"}
+               {:current  "(target :new)"
+                :expected :changed
+                :old      "(target :old)"
+                :target   "(target :old)"}
+               {:current  ""
+                :expected :deleted
+                :old      "(target)"
+                :target   "(target)"}
+               {:current  "(def duplicates [(same) (same) (same)])"
+                :expected :ambiguous
+                :old      "(def duplicates [(same) (same)])"
+                :target   "(same)"}]]
+    (doseq [{:keys [current expected old target]} cases]
+      (testing (name expected)
+        (let [old-document     (parsed old)
+              current-document (parsed current)
+              entry            (entry-with-source old-document target)
+              [state [handle]]  (issue-entries old-document [entry])
+              result           (sut/reconcile old-document
+                                              current-document
+                                              (:handles state))]
+          (is (= {handle expected}
+                 (:handle-statuses result)))
+          (is (contains? #{:preserved :changed :deleted :ambiguous}
+                         (get-in result [:handle-statuses handle]))))))))
+
+(deftest active-manifests-must-match-the-baseline-tree
+  (let [old              (parsed "(target :old)")
+        current          (parsed "(target :new)")
+        entry            (entry-with-source old "(target :old)")
+        [state [handle]] (issue-entries old [entry])
+        manifest         (get-in state [:handles handle])
+        cases            [{:manifest (assoc manifest
+                                            :path
+                                            [{:role :top-level
+                                              :index 99}])
+                           :reason   :baseline-path-not-found}
+                          {:manifest (assoc manifest
+                                            :concrete-hash
+                                            (apply str (repeat 64 "0")))
+                           :reason   :baseline-concrete-hash-mismatch}
+                          {:manifest (assoc manifest :node-tag :vector)
+                           :reason   :baseline-node-tag-mismatch}]]
+    (is (= (mapv (fn [{:keys [reason]}]
+                   {:code   :internal-state-error
+                    :handle handle
+                    :reason reason})
+                 cases)
+           (mapv (fn [{:keys [manifest]}]
+                   (select-keys
+                    (active-reconciliation-error old
+                                                 current
+                                                 {handle manifest})
+                    [:code :handle :reason]))
+                 cases)))))
+
+(deftest unresolved-crossing-anchor-handle-is-ambiguous
+  (let [old-source     "[(left) (wrapper (target) :old) (right)]"
+        current-source "[(right) (wrapper (target) :new) (left)]"
+        old            (parsed old-source)
+        current        (parsed current-source)
+        wrapper        (entry-with-source old "(wrapper (target) :old)")
+        [state [handle]] (issue-entries old [wrapper])
+        result          (sut/reconcile old current (:handles state))]
+    (is (= {handle :ambiguous} (:handle-statuses result)))))

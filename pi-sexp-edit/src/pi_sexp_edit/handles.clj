@@ -1,7 +1,9 @@
 (ns pi-sexp-edit.handles
   (:require
    [cheshire.core :as json]
-   [clojure.string :as str]))
+   [clojure.string :as str]
+   [pi-sexp-edit.parse :as parse]
+   [pi-sexp-edit.reconcile :as reconcile]))
 
 (def handle-marker "§")
 
@@ -83,6 +85,8 @@
     state))
 
 (def ^:private concrete-hash-pattern #"^[0-9a-f]{64}$")
+(def ^:private retirement-reasons
+  #{:ambiguous :changed :deleted :replaced})
 (def ^:private active-manifest-keys
   #{:advertised? :concrete-hash :handle :node-tag :path :status})
 (def ^:private retired-manifest-keys
@@ -157,7 +161,7 @@
        (re-matches concrete-hash-pattern (:concrete-hash manifest))
        (valid-path? (:path manifest))
        (or (= :active status)
-           (keyword? (:reason manifest)))))
+           (contains? retirement-reasons (:reason manifest)))))
 
 (defn- validate-manifests! [state field status]
   (doseq [[handle manifest] (get state field)]
@@ -189,12 +193,23 @@
                           (keys (:handles state)))]
     (throw (internal-state-error :overlapping-handles {:handle handle})))
   (let [next-handle-id (:next-handle-id state)
-        issued-ids     (map parse-handle
-                            (concat (keys (:handles state))
-                                    (keys (:retired-handles state))))]
+        issued-ids     (mapv parse-handle
+                             (concat (keys (:handles state))
+                                     (keys (:retired-handles state))))]
     (when (some #(>= % next-handle-id) issued-ids)
       (throw (internal-state-error :invalid-state-field
-                                   {:field :next-handle-id}))))
+                                   {:field :next-handle-id})))
+    (let [expected-ids (set (range 1 next-handle-id))
+          actual-ids   (set issued-ids)]
+      (when-not (= expected-ids actual-ids)
+        (throw (internal-state-error
+                :invalid-handle-ledger
+                {:missing-handles (mapv format-handle
+                                        (sort (remove actual-ids
+                                                      expected-ids)))
+                 :unexpected-handles (mapv format-handle
+                                           (sort (remove expected-ids
+                                                         actual-ids)))})))))
   state)
 
 (defn state->json [state]
@@ -213,3 +228,130 @@
         (if (= :internal-state-error (:code (ex-data exception)))
           (throw exception)
           (throw (internal-state-error :malformed-json {} exception)))))))
+
+(def ^:private lifecycle-statuses
+  #{:ambiguous :changed :deleted :preserved})
+
+(defn- expected-handle-statuses [state reconciliation]
+  (into {}
+        (map (fn [[handle manifest]]
+               (let [path (:path manifest)]
+                 (when-not (contains? (:statuses reconciliation) path)
+                   (throw (internal-state-error
+                           :incomplete-path-reconciliation
+                           {:handle handle
+                            :path   path})))
+                 [handle (get-in reconciliation [:statuses path])]))
+             (:handles state))))
+
+(defn- preserved-current-entry [state current-document reconciliation handle]
+  (let [old-path     (get-in state [:handles handle :path])
+        current-path (get-in reconciliation [:pairs old-path :current-path])
+        current-entry (parse/node-at-path current-document current-path)]
+    (when-not current-entry
+      (throw (internal-state-error :invalid-preserved-mapping
+                                   {:handle handle
+                                    :path   old-path})))
+    current-entry))
+
+(defn- validate-preserved-handle!
+  [state current-document reconciliation handle]
+  (let [manifest      (get-in state [:handles handle])
+        current-entry (preserved-current-entry state
+                                               current-document
+                                               reconciliation
+                                               handle)]
+    (when-not (and (= (:concrete-hash manifest)
+                      (:concrete-hash current-entry))
+                   (= (:node-tag manifest) (:tag current-entry)))
+      (throw (internal-state-error :invalid-preserved-mapping
+                                   {:handle handle
+                                    :path   (:path manifest)})))
+    (:path current-entry)))
+
+(defn- validate-reconciliation! [state current-document reconciliation]
+  (let [expected-statuses (expected-handle-statuses state reconciliation)
+        handle-statuses   (:handle-statuses reconciliation)
+        expected-handles  (set (keys (:handles state)))
+        actual-handles    (if (map? handle-statuses)
+                            (set (keys handle-statuses))
+                            #{})]
+    (when-not (= expected-handles actual-handles)
+      (throw (internal-state-error
+              :incomplete-handle-reconciliation
+              {:missing-handles    (sort (remove actual-handles
+                                                 expected-handles))
+               :unexpected-handles (sort (remove expected-handles
+                                                 actual-handles))})))
+    (doseq [[handle status] (sort-by key handle-statuses)]
+      (when-not (contains? lifecycle-statuses status)
+        (throw (internal-state-error :invalid-lifecycle-status
+                                     {:handle handle
+                                      :status status})))
+      (when-not (= status (get expected-statuses handle))
+        (throw (internal-state-error :contradictory-lifecycle-status
+                                     {:actual   status
+                                      :expected (get expected-statuses handle)
+                                      :handle   handle}))))
+    (let [preserved-paths
+          (mapv (fn [[handle _status]]
+                  (validate-preserved-handle! state
+                                              current-document
+                                              reconciliation
+                                              handle))
+                (filter (comp #{:preserved} val)
+                        (sort-by key handle-statuses)))]
+      (when-not (= (count preserved-paths) (count (set preserved-paths)))
+        (throw (internal-state-error :non-injective-handle-reconciliation
+                                     {}))))
+    reconciliation))
+
+(defn- apply-handle-status
+  [state current-document reconciliation [handle status]]
+  (if (= :preserved status)
+    (let [current-entry (preserved-current-entry state
+                                                 current-document
+                                                 reconciliation
+                                                 handle)]
+      (assoc-in state
+                [:handles handle]
+                (assoc (get-in state [:handles handle])
+                       :concrete-hash (:concrete-hash current-entry)
+                       :node-tag (:tag current-entry)
+                       :path (:path current-entry))))
+    (retire-handle state handle status)))
+
+(defn- transitioned-state [state current-document reconciliation]
+  (-> (reduce (fn [next-state handle-status]
+                (apply-handle-status next-state
+                                     current-document
+                                     reconciliation
+                                     handle-status))
+              state
+              (sort-by key (:handle-statuses reconciliation)))
+      (assoc :baseline-source (:source current-document))
+      validate-state!))
+
+(defn- parsed-baseline [state]
+  (try
+    (parse/parse-source (:baseline-source state)
+                        {:document-id (:document-id state)})
+    (catch Exception exception
+      (throw (internal-state-error :invalid-baseline-source
+                                   {:document-id (:document-id state)}
+                                   exception)))))
+
+(defn reconcile-state [state current-source]
+  (let [state             (validate-state! state)
+        document-id       (:document-id state)
+        baseline-document (parsed-baseline state)
+        current-document  (parse/parse-source current-source
+                                              {:document-id document-id})
+        reconciliation    (reconcile/reconcile baseline-document
+                                               current-document
+                                               (:handles state))]
+    (validate-reconciliation! state current-document reconciliation)
+    {:reconciliation reconciliation
+     :state          (transitioned-state state
+                                         current-document
+                                         reconciliation)}))
