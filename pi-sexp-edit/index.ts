@@ -1,8 +1,8 @@
 import { StringEnum, Type, type Static } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const HANDLE_MARKER = "§";
@@ -131,6 +131,111 @@ export async function invokeBabashka(
   } finally {
     await rm(temporaryDirectory, { force: true, recursive: true });
   }
+}
+
+const supportedExtensions = new Set([".bb", ".clj", ".cljc", ".cljd", ".cljs", ".edn"]);
+
+export class DocumentRegistryError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "DocumentRegistryError";
+    this.code = code;
+  }
+}
+
+export function normalizeToolPath(path: string): string {
+  return path.startsWith("@") ? path.slice(1) : path;
+}
+
+function requireSupportedExtension(path: string): void {
+  if (!supportedExtensions.has(extname(path))) {
+    throw new DocumentRegistryError(
+      "unsupported-extension",
+      "Expected a .clj, .cljs, .cljc, .bb, .edn, or .cljd file",
+    );
+  }
+}
+
+export async function canonicalizeDocumentPath(path: string, cwd: string): Promise<string> {
+  const normalized = normalizeToolPath(path);
+  if (normalized.length === 0) {
+    throw new DocumentRegistryError("path-not-found", "Document path is empty");
+  }
+  const absolute = resolve(cwd, normalized);
+  requireSupportedExtension(absolute);
+
+  let canonical: string;
+  try {
+    canonical = await realpath(absolute);
+  } catch {
+    throw new DocumentRegistryError("path-not-found", `Document path does not exist: ${absolute}`);
+  }
+  requireSupportedExtension(canonical);
+  const metadata = await stat(canonical);
+  if (!metadata.isFile()) {
+    throw new DocumentRegistryError("path-not-file", `Document path is not a file: ${canonical}`);
+  }
+  return canonical;
+}
+
+export class FifoLock {
+  private tail: Promise<void> = Promise.resolve();
+
+  run<T>(task: () => Promise<T> | T): Promise<T> {
+    let release!: () => void;
+    const predecessor = this.tail;
+    this.tail = new Promise<void>((resolveTail) => {
+      release = resolveTail;
+    });
+    return predecessor.then(task).finally(release);
+  }
+}
+
+export interface DocumentRecord {
+  canonicalPath: string;
+  documentId: string;
+  lock: FifoLock;
+  state?: OpaqueState;
+}
+
+export class DocumentRegistry {
+  private readonly byDocumentId = new Map<string, DocumentRecord>();
+  private readonly byPath = new Map<string, DocumentRecord>();
+  private nextDocumentId = 1;
+
+  async openPath(path: string, cwd: string): Promise<DocumentRecord> {
+    const canonicalPath = await canonicalizeDocumentPath(path, cwd);
+    const existing = this.byPath.get(canonicalPath);
+    if (existing) return existing;
+
+    const documentId = `D${this.nextDocumentId.toString(36)}`;
+    this.nextDocumentId += 1;
+    const record: DocumentRecord = {
+      canonicalPath,
+      documentId,
+      lock: new FifoLock(),
+    };
+    this.byPath.set(canonicalPath, record);
+    this.byDocumentId.set(documentId, record);
+    return record;
+  }
+
+  getDocument(documentId: string): DocumentRecord {
+    const record = this.byDocumentId.get(documentId);
+    if (!record) {
+      throw new DocumentRegistryError(
+        "unknown-document",
+        `Unknown document ID: ${documentId}`,
+      );
+    }
+    return record;
+  }
+}
+
+export function createDocumentRegistry(): DocumentRegistry {
+  return new DocumentRegistry();
 }
 
 
@@ -275,18 +380,19 @@ const editDescription =
   "Missing delimiters may be repaired only when unambiguous, and every repair is reported. " +
   "Returns affected handles, a unified diff, and continuation excerpts capped at 2,000 lines or 50 KB.";
 
-function unwired(toolName: string): never {
+function unwired(toolName: string, _documents: DocumentRegistry): never {
   throw new Error(`${toolName} execution is not wired yet`);
 }
 
 export default function (pi: ExtensionAPI): void {
+  const documents = createDocumentRegistry();
   pi.registerTool({
     name: "sexp_read",
     label: "S-expression Read",
     description: readDescription,
     parameters: sexpReadSchema,
     async execute() {
-      return unwired("sexp_read");
+      return unwired("sexp_read", documents);
     },
   });
 
@@ -296,7 +402,7 @@ export default function (pi: ExtensionAPI): void {
     description: editDescription,
     parameters: sexpEditSchema,
     async execute() {
-      return unwired("sexp_edit");
+      return unwired("sexp_edit", documents);
     },
   });
 }

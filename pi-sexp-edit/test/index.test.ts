@@ -1,6 +1,16 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -206,6 +216,27 @@ function domainEnvelope(): string {
     protocol_version: 1,
     state: { baseline: "latest" },
   });
+}
+
+interface TestLock {
+  run<T>(task: () => Promise<T> | T): Promise<T>;
+}
+
+interface TestDocumentRecord {
+  canonicalPath: string;
+  documentId: string;
+  lock: TestLock;
+  state?: unknown;
+}
+
+interface TestRegistry {
+  getDocument(documentId: string): TestDocumentRecord;
+  openPath(path: string, cwd: string): Promise<TestDocumentRecord>;
+}
+
+function registryFactory(): (() => TestRegistry) | undefined {
+  return (extensionModule as unknown as { createDocumentRegistry?: () => TestRegistry })
+    .createDocumentRegistry;
 }
 
 describe("package", () => {
@@ -585,5 +616,194 @@ describe("package", () => {
     expect({ accepted: accepted.state, invalidRejected: Boolean(rejected) }).toEqual({
       accepted: state, invalidRejected: true,
     });
+  });
+
+  test("relative absolute and one-leading-at paths resolve canonically", async () => {
+    const createRegistry = registryFactory();
+    expect(typeof createRegistry).toBe("function");
+    if (!createRegistry) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-registry-"));
+    try {
+      const ordinary = join(directory, "ordinary.clj");
+      const atNamed = join(directory, "@ordinary.clj");
+      writeFileSync(ordinary, "(ordinary)");
+      writeFileSync(atNamed, "(at-named)");
+      const registry = createRegistry();
+      const relative = await registry.openPath("ordinary.clj", directory);
+      const absolute = await registry.openPath(ordinary, "/unrelated/cwd");
+      const oneAt = await registry.openPath("@ordinary.clj", directory);
+      const twoAt = await registry.openPath("@@ordinary.clj", directory);
+      expect({
+        absolute: absolute.canonicalPath,
+        oneAt: oneAt.canonicalPath,
+        relative: relative.canonicalPath,
+        sameRecord: relative === absolute && relative === oneAt,
+        twoAt: twoAt.canonicalPath,
+      }).toEqual({
+        absolute: realpathSync(ordinary),
+        oneAt: realpathSync(ordinary),
+        relative: realpathSync(ordinary),
+        sameRecord: true,
+        twoAt: realpathSync(atNamed),
+      });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("symlink aliases reopen one canonical document record", async () => {
+    const createRegistry = registryFactory();
+    expect(typeof createRegistry).toBe("function");
+    if (!createRegistry) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-registry-"));
+    try {
+      const source = join(directory, "source.clj");
+      const alias = join(directory, "alias.clj");
+      const unsupportedTarget = join(directory, "target.txt");
+      const deceptiveAlias = join(directory, "deceptive.clj");
+      const unsupportedAlias = join(directory, "unsupported.txt");
+      writeFileSync(source, "(same)");
+      writeFileSync(unsupportedTarget, "plain");
+      symlinkSync(source, alias);
+      symlinkSync(unsupportedTarget, deceptiveAlias);
+      symlinkSync(source, unsupportedAlias);
+      const registry = createRegistry();
+      const direct = await registry.openPath(source, directory);
+      const linked = await registry.openPath(alias, directory);
+      const canonicalMismatch = await caught(() => registry.openPath(deceptiveAlias, directory));
+      const requestedMismatch = await caught(() => registry.openPath(unsupportedAlias, directory));
+      expect({
+        canonical: linked.canonicalPath,
+        mismatchCodes: [canonicalMismatch, requestedMismatch].map(
+          (error) => (error as Error & { code?: string })?.code,
+        ),
+        sameId: direct.documentId === linked.documentId,
+        sameRecord: direct === linked,
+      }).toEqual({
+        canonical: realpathSync(source),
+        mismatchCodes: ["unsupported-extension", "unsupported-extension"],
+        sameId: true,
+        sameRecord: true,
+      });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("only existing regular supported Clojure-family files open", async () => {
+    const createRegistry = registryFactory();
+    expect(typeof createRegistry).toBe("function");
+    if (!createRegistry) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-registry-"));
+    try {
+      const supported = ["clj", "cljs", "cljc", "bb", "edn", "cljd"];
+      const registry = createRegistry();
+      const opened: boolean[] = [];
+      for (const extension of supported) {
+        const path = join(directory, `sample.${extension}`);
+        writeFileSync(path, "(ok)");
+        opened.push(Boolean(await registry.openPath(path, directory)));
+      }
+      const unsupported = join(directory, "sample.txt");
+      writeFileSync(unsupported, "text");
+      const childDirectory = join(directory, "directory.clj");
+      mkdirSync(childDirectory);
+      const errors = await Promise.all([
+        caught(() => registry.openPath(join(directory, "missing.clj"), directory)),
+        caught(() => registry.openPath(childDirectory, directory)),
+        caught(() => registry.openPath(unsupported, directory)),
+      ]);
+      expect({
+        errorCodes: errors.map((error) => (error as Error & { code?: string })?.code),
+        opened,
+      }).toEqual({
+        errorCodes: ["path-not-found", "path-not-file", "unsupported-extension"],
+        opened: supported.map(() => true),
+      });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("document IDs records states and fresh registries stay isolated", async () => {
+    const createRegistry = registryFactory();
+    expect(typeof createRegistry).toBe("function");
+    if (!createRegistry) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-registry-"));
+    try {
+      const firstPath = join(directory, "first.clj");
+      const secondPath = join(directory, "second.edn");
+      writeFileSync(firstPath, "(first)");
+      writeFileSync(secondPath, "[:second]");
+      const registry = createRegistry();
+      const first = await registry.openPath(firstPath, directory);
+      const reopened = await registry.openPath(firstPath, directory);
+      const second = await registry.openPath(secondPath, directory);
+      const records = [first, second];
+      for (let index = 3; index <= 10; index += 1) {
+        const path = join(directory, `${index}.clj`);
+        writeFileSync(path, `(${index})`);
+        records.push(await registry.openPath(path, directory));
+      }
+      first.state = { handles: ["§1"] };
+      second.state = { handles: ["§2"] };
+      const fresh = createRegistry();
+      const unknown = await caught(async () => fresh.getDocument(first.documentId));
+      const freshFirst = await fresh.openPath(firstPath, directory);
+      expect({
+        firstId: first.documentId,
+        firstLookup: registry.getDocument(first.documentId) === first,
+        firstState: first.state,
+        freshFirstId: freshFirst.documentId,
+        freshUnknown: (unknown as Error & { code?: string })?.code,
+        ninthId: records[8]?.documentId,
+        reopened: reopened === first,
+        secondId: second.documentId,
+        secondState: second.state,
+        tenthId: records[9]?.documentId,
+      }).toEqual({
+        firstId: "D1", firstLookup: true, firstState: { handles: ["§1"] },
+        freshFirstId: "D1", freshUnknown: "unknown-document", ninthId: "D9",
+        reopened: true, secondId: "D2", secondState: { handles: ["§2"] },
+        tenthId: "Da",
+      });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("each record owns one FIFO lock shared by reads and edits", async () => {
+    const createRegistry = registryFactory();
+    expect(typeof createRegistry).toBe("function");
+    if (!createRegistry) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-registry-"));
+    try {
+      const firstPath = join(directory, "first.clj");
+      const secondPath = join(directory, "second.clj");
+      writeFileSync(firstPath, "(first)");
+      writeFileSync(secondPath, "(second)");
+      const registry = createRegistry();
+      const first = await registry.openPath(firstPath, directory);
+      const second = await registry.openPath(secondPath, directory);
+      const order: string[] = [];
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const read = first.lock.run(async () => { order.push("read:start"); await gate; order.push("read:end"); });
+      const edit = registry.getDocument(first.documentId).lock.run(async () => { order.push("edit"); });
+      await Promise.resolve();
+      release();
+      await Promise.all([read, edit]);
+      expect({
+        distinctRecordLocks: first.lock !== second.lock,
+        order,
+        sharedLookupLock: registry.getDocument(first.documentId).lock === first.lock,
+      }).toEqual({
+        distinctRecordLocks: true,
+        order: ["read:start", "read:end", "edit"],
+        sharedLookupLock: true,
+      });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
   });
 });

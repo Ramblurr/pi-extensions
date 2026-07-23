@@ -103,12 +103,17 @@
   - Validation: full Clojure suite 182 tests / 508 assertions; Bun 12 tests; real TypeBox compilation, whitespace, and newline checks pass.
   - Review: Pi Link review against `07196e4` found no Critical or Important issues and one Minor duplicated handle regex; exported shared marker/pattern constants fixed it, and follow-up review found no remaining findings.
 - [x] Task 20: Add secure, cancellable Babashka process invocation
-  - Commit: `runner: add secure babashka invocation` (this task's commit)
+  - Commit: `fad1b65 runner: add secure babashka invocation`
   - Notes: Added package-relative Babashka discovery, private request material, fixed argv invocation, signal/timeout forwarding, exact bounded envelope validation, bounded diagnostics, and unconditional cleanup.
   - TDD: RED was 5 behavior failures / 0 errors; GREEN is 18 Bun tests / 24 assertions after failure-envelope and killed-process review coverage.
   - Validation: full Clojure suite 182 tests / 508 assertions; Bun 18 tests; real runtime import, whitespace, and newline checks pass.
   - Review: Pi Link review against `23862c4` found one Important failure-envelope test gap and one Minor killed-process realism gap; both were closed, and follow-up review found no remaining findings.
-- [ ] Task 21: Canonicalize paths and manage process-local documents
+- [x] Task 21: Canonicalize paths and manage process-local documents
+  - Commit: `documents: canonicalize paths and manage records` (this task's commit)
+  - Notes: Added one-leading-@ normalization, dual requested/canonical extension gates, realpath file canonicalization, symlink record reuse, compact base-36 IDs, isolated record state, and per-record FIFO locks.
+  - TDD: RED was 5 behavior failures / 0 errors; GREEN is 23 Bun tests / 34 assertions after canonical-extension and D9→Da review regressions.
+  - Validation: full Clojure suite 182 tests / 508 assertions; Bun 23 tests; whitespace and newline checks pass.
+  - Review: Pi Link review against `fad1b65` found one Important canonical symlink extension bypass and one Minor base-36 proof gap; both were fixed tests-first, and follow-up review found no remaining findings.
 - [ ] Task 22: Wire `sexp_read` through the registry and Babashka
 - [ ] Task 23: Add queued atomic `sexp_edit` file replacement
 - [ ] Task 24: Format bounded results and structured errors
