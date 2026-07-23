@@ -1,7 +1,9 @@
 (ns pi-sexp-edit.edit
   (:require
    [clojure.string :as str]
+   [pi-sexp-edit.handles :as handles]
    [pi-sexp-edit.parse :as parse]
+   [pi-sexp-edit.render :as render]
    [pi-sexp-edit.validation :as validation]
    [rewrite-clj.node :as node]
    [rewrite-clj.zip :as z]))
@@ -249,21 +251,29 @@
        right))
 
 (defn- patched-source [source groups]
-  (loop [cursor   0
-         patches  (target-patches source groups)
-         rendered ""]
+  (loop [changed-ranges []
+         cursor         0
+         patches        (target-patches source groups)
+         rendered       ""]
     (if-let [{:keys [end replacement start]} (first patches)]
       (do
         (when (< start cursor)
           (throw (ex-info "Batch target spans overlap"
                           {:code   :internal-state-error
                            :reason :overlapping-target-spans})))
-        (recur end
-               (next patches)
-               (-> rendered
-                   (safely-joined (subs source cursor start))
-                   (safely-joined replacement))))
-      (safely-joined rendered (subs source cursor)))))
+        (let [with-unchanged (safely-joined
+                              rendered
+                              (subs source cursor start))
+              change-start  (count with-unchanged)
+              with-change   (safely-joined with-unchanged replacement)
+              change-end    (count with-change)]
+          (recur (conj changed-ranges
+                       {:end change-end :start change-start})
+                 end
+                 (next patches)
+                 with-change)))
+      {:changed-ranges changed-ranges
+       :source (safely-joined rendered (subs source cursor))})))
 
 (defn- structural-shape [syntax-node]
   (let [tag (node/tag syntax-node)]
@@ -311,6 +321,60 @@
       (throw (invalid-structural-candidate validated)))
     candidate))
 
+(defn- range-overlaps-span? [{range-start :start range-end :end}
+                             {span-start :start span-end :end}]
+  (if (< range-start range-end)
+    (and (< range-start span-end) (< span-start range-end))
+    (and (<= span-start range-start) (< range-start span-end))))
+
+(defn- span-distance [{range-start :start range-end :end}
+                      {span-start :start span-end :end}]
+  (cond
+    (< range-end span-start) (- span-start range-end)
+    (< span-end range-start) (- range-start span-end)
+    :else 0))
+
+(defn- excerpt-entries [candidate changed-ranges]
+  (let [source  (:source candidate)
+        starts  (line-start-offsets source)
+        entries (mapv (fn [entry]
+                        (let [[start end] (target-span source starts entry)]
+                          {:entry entry
+                           :span  {:end end :start start}}))
+                      (parse/structural-children candidate []))]
+    (->> changed-ranges
+         (mapcat (fn [changed-range]
+                   (let [overlapping
+                         (filter #(range-overlaps-span? changed-range (:span %))
+                                 entries)]
+                     (if (seq overlapping)
+                       overlapping
+                       (when (seq entries)
+                         [(apply min-key
+                                 #(span-distance changed-range (:span %))
+                                 entries)])))))
+         (reduce (fn [{:keys [paths selected]} {:keys [entry]}]
+                   (if (contains? paths (:path entry))
+                     {:paths paths :selected selected}
+                     {:paths (conj paths (:path entry))
+                      :selected (conj selected entry)}))
+                 {:paths #{} :selected []})
+         :selected)))
+
+(defn- newly-retired-manifests [input-state candidate-state]
+  (let [previously-retired (set (keys (:retired-handles input-state)))]
+    (->> (:retired-handles candidate-state)
+         (remove (comp previously-retired key))
+         (sort-by (comp handles/parse-handle key)))))
+
+(defn- retirement-report [input-state candidate-state]
+  (let [retired (newly-retired-manifests input-state candidate-state)]
+    {:omitted-internal-counts
+     {:retired-handles (count (remove (comp :advertised? val) retired))}
+     :retired-handles
+     (into [] (keep (fn [[handle manifest]]
+                      (when (:advertised? manifest) handle))) retired)}))
+
 (defn edit-source
   "Validates and applies one transactional structural edit batch.
 
@@ -320,14 +384,31 @@
         groups           (prepared-groups (:target-plan validated))
         expected-root    (structurally-mutated-root (:document validated)
                                                     groups)
-        candidate-source (patched-source (get-in validated [:document :source])
+        mutation         (patched-source (get-in validated [:document :source])
                                          groups)
+        candidate-source (:source mutation)
         candidate        (candidate-document validated
                                              candidate-source
-                                             expected-root)]
+                                             expected-root)
+        candidate-state  (:state (handles/reconcile-candidate-state
+                                  (:state validated)
+                                  candidate-source
+                                  (:edits validated)))
+        rendered         (render/render-excerpts
+                          candidate
+                          candidate-state
+                          (excerpt-entries candidate
+                                           (:changed-ranges mutation)))
+        state            (:state rendered)
+        retirement       (retirement-report (:state request) state)]
     {:applied-edits                (count (:edits validated))
      :candidate-document           candidate
      :candidate-source             candidate-source
+     :created-handles              (:created-handles rendered)
+     :excerpt-handles              (:shown-handles rendered)
+     :excerpts                     (:text rendered)
      :external-changes-reconciled? (:external-changes-reconciled? validated)
+     :omitted-internal-counts       (:omitted-internal-counts retirement)
      :repairs                      (:repairs validated)
-     :state                        (:state validated)}))
+     :retired-handles              (:retired-handles retirement)
+     :state                        state}))

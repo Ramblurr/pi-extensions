@@ -976,3 +976,294 @@
                          "    tail)")}
            {:after (get-in after [:value :result :candidate-source])
             :before (get-in before [:value :result :candidate-source])}))))
+
+(defn- issued-context [source specs]
+  (let [document (parse/parse-source source {:document-id document-id})
+        entries  (distinct-target-entries document (mapv :source specs))]
+    (reduce (fn [{:keys [handles state]} [entry spec]]
+              (let [[allocated handle] (handles/allocate-handle state entry)
+                    next-state (if (:advertised? spec)
+                                 (handles/advertise-handle allocated handle)
+                                 allocated)]
+                {:handles (conj handles handle)
+                 :state next-state}))
+            {:handles []
+             :state (handles/initial-state document-id canonical-path source)}
+            (map vector entries specs))))
+
+(defn- issued-edit [source specs operation]
+  (let [{:keys [handles state]} (issued-context source specs)
+        request-edit (-> operation
+                         (dissoc :target-index)
+                         (assoc :target (nth handles (:target-index operation))))]
+    {:handles handles
+     :input-state state
+     :value (try
+              {:result (edit/edit-source
+                        (edit-request source state [request-edit]))}
+              (catch Exception exception
+                {:error (ex-data exception)}))}))
+
+(defn- retired-reasons [state handles]
+  (into {}
+        (map (fn [handle]
+               [handle (get-in state [:retired-handles handle :reason])]))
+        handles))
+
+(defn- handle-for-source [document state source]
+  (some (fn [[handle manifest]]
+          (when (= source
+                   (:source (parse/node-at-path document (:path manifest))))
+            handle))
+        (:handles state)))
+
+(defn- created-sources [result]
+  (mapv (fn [handle]
+          (:source (parse/node-at-path
+                    (:candidate-document result)
+                    (get-in result [:state :handles handle :path]))))
+        (:created-handles result)))
+
+(deftest equal-one-form-replacement-always-retires-its-target-handle
+  (let [source "(target value)"
+        outcome (issued-edit source
+                             [{:advertised? true :source source}]
+                             {:new_form source
+                              :operation "replace"
+                              :target-index 0})
+        old-handle (first (:handles outcome))
+        result (get-in outcome [:value :result])]
+    (is (= {:active-old? false
+            :baseline source
+            :created-handles ["§2"]
+            :retired-handles [old-handle]
+            :retired-reason :replaced}
+           {:active-old? (some? (handles/resolve-handle (:state result)
+                                                        old-handle))
+            :baseline (get-in result [:state :baseline-source])
+            :created-handles (:created-handles result)
+            :retired-handles (:retired-handles result)
+            :retired-reason (get-in result
+                                    [:state
+                                     :retired-handles
+                                     old-handle
+                                     :reason])}))))
+
+(deftest deletion-retires-the-target-and-every-issued-descendant
+  (let [source "(outer (target child) (sibling))"
+        outcome (issued-edit source
+                             [{:advertised? true :source "(target child)"}
+                              {:advertised? true :source "child"}]
+                             {:operation "delete"
+                              :target-index 0})
+        result (get-in outcome [:value :result])]
+    (is (= (zipmap (:handles outcome) (repeat :deleted))
+           (retired-reasons (:state result) (:handles outcome))))))
+
+(deftest changing-a-descendant-retires-issued-ancestors
+  (let [source "(outer (target old) (stable))"
+        outcome (issued-edit source
+                             [{:advertised? true :source source}
+                              {:advertised? true :source "(target old)"}
+                              {:advertised? true :source "old"}]
+                             {:new_form "new"
+                              :operation "replace"
+                              :target-index 2})
+        [outer target old] (:handles outcome)
+        result (get-in outcome [:value :result])]
+    (is (= {outer :changed
+            target :changed
+            old :replaced}
+           (retired-reasons (:state result) [outer target old])))))
+
+(deftest unchanged-descendants-survive-a-changed-ancestor
+  (let [source "(outer (change old) (stable child))"
+        outcome (issued-edit source
+                             [{:advertised? true :source source}
+                              {:advertised? true :source "(change old)"}
+                              {:advertised? true :source "(stable child)"}]
+                             {:new_form "(change new)"
+                              :operation "replace"
+                              :target-index 1})
+        [outer changed stable] (:handles outcome)
+        result (get-in outcome [:value :result])
+        state (:state result)]
+    (is (= {:changed-reason :replaced
+            :outer-reason :changed
+            :stable-active? true
+            :stable-source "(stable child)"}
+           {:changed-reason (get-in state
+                                    [:retired-handles changed :reason])
+            :outer-reason (get-in state [:retired-handles outer :reason])
+            :stable-active? (some? (handles/resolve-handle state stable))
+            :stable-source (:source
+                            (parse/node-at-path
+                             (:candidate-document result)
+                             (get-in state [:handles stable :path])))}))))
+
+(deftest insertion-preserves-unchanged-sibling-and-boundary-handles
+  (let [source "(outer (left) (boundary) (right))"
+        outcome (issued-edit source
+                             [{:advertised? true :source "(boundary)"}
+                              {:advertised? true :source "(left)"}
+                              {:advertised? true :source "(right)"}]
+                             {:new_form "(inserted)"
+                              :operation "insert_before"
+                              :target-index 0})
+        result (get-in outcome [:value :result])
+        state (:state result)]
+    (is (= (set (:handles outcome))
+           (set (filter #(handles/resolve-handle state %)
+                        (:handles outcome)))))))
+
+(deftest rendered-replacements-insertions-and-ancestors-get-visible-new-handles
+  (let [replace-source "(outer (target))"
+        replacement (issued-edit
+                     replace-source
+                     [{:advertised? true :source replace-source}
+                      {:advertised? true :source "(target)"}]
+                     {:new_form "(replacement (nested))"
+                      :operation "replace"
+                      :target-index 1})
+        insert-source "(outer (boundary))"
+        insertion (issued-edit
+                   insert-source
+                   [{:advertised? true :source insert-source}
+                    {:advertised? true :source "(boundary)"}]
+                   {:new_form "(inserted)"
+                    :operation "insert_before"
+                    :target-index 1})
+        replacement-result (get-in replacement [:value :result])
+        insertion-result (get-in insertion [:value :result])]
+    (is (= {:insertion-created ["(outer (inserted) (boundary))"
+                                "(inserted)"]
+            :insertion-preserved-boundary? true
+            :replacement-created ["(outer (replacement (nested)))"
+                                  "(replacement (nested))"
+                                  "(nested)"]}
+           {:insertion-created (created-sources insertion-result)
+            :insertion-preserved-boundary?
+            (some? (handles/resolve-handle
+                    (:state insertion-result)
+                    (second (:handles insertion))))
+            :replacement-created (created-sources replacement-result)}))))
+
+(deftest edit-results-report-advertised-retirements-excerpt-handles-and-hidden-counts
+  (let [source "(outer (target old))"
+        outcome (issued-edit source
+                             [{:advertised? false :source source}
+                              {:advertised? true :source "(target old)"}]
+                             {:new_form "(replacement (nested))"
+                              :operation "replace"
+                              :target-index 1})
+        [hidden target] (:handles outcome)
+        result (get-in outcome [:value :result])]
+    (is (= {:baseline (:candidate-source result)
+            :created-handles ["§3" "§4" "§5"]
+            :excerpt-handles ["§3" "§4" "§5"]
+            :hidden-reason :changed
+            :omitted-internal-counts {:retired-handles 1}
+            :retired-handles [target]
+            :target-reason :replaced}
+           {:baseline (get-in result [:state :baseline-source])
+            :created-handles (:created-handles result)
+            :excerpt-handles (:excerpt-handles result)
+            :hidden-reason (get-in result
+                                   [:state :retired-handles hidden :reason])
+            :omitted-internal-counts (:omitted-internal-counts result)
+            :retired-handles (:retired-handles result)
+            :target-reason (get-in result
+                                   [:state :retired-handles target :reason])}))))
+
+(deftest excerpts-are-compact-annotated-and-support-a-follow-up-edit
+  (let [source (str "(alpha (target))\n"
+                    "(unrelated (hidden))")
+        outcome (issued-edit source
+                             [{:advertised? true :source "(target)"}]
+                             {:new_form "(replacement)"
+                              :operation "replace"
+                              :target-index 0})
+        result (get-in outcome [:value :result])
+        excerpt (or (:excerpts result) "")
+        replacement-handle (when result
+                             (handle-for-source (:candidate-document result)
+                                                (:state result)
+                                                "(replacement)"))
+        follow-up (when replacement-handle
+                    (try
+                      (edit/edit-source
+                       (edit-request
+                        (:candidate-source result)
+                        (:state result)
+                        [{:new_form "(again)"
+                          :operation "replace"
+                          :target replacement-handle}]))
+                      (catch Exception exception
+                        {:error (ex-data exception)})))]
+    (is (= {:excerpt-has-handle? true
+            :excerpt-has-replacement? true
+            :excerpt-omits-unrelated? true
+            :follow-up-source (str "(alpha (again))\n"
+                                   "(unrelated (hidden))")
+            :replacement-handle-active? true}
+           {:excerpt-has-handle? (str/includes? excerpt "§")
+            :excerpt-has-replacement? (str/includes? excerpt
+                                                     "(replacement)")
+            :excerpt-omits-unrelated? (not (str/includes? excerpt
+                                                          "unrelated"))
+            :follow-up-source (:candidate-source follow-up)
+            :replacement-handle-active?
+            (some? (handles/resolve-handle (:state result)
+                                           replacement-handle))}))))
+
+(defn- active-structural-index [state handle]
+  (some-> (handles/resolve-handle state handle) :path last :index))
+
+(deftest controlled-duplicate-mutations-preserve-unaffected-occurrences
+  (let [inserted (issued-edit
+                  "[(same) (same)]"
+                  [{:advertised? true :source "(same)"}
+                   {:advertised? true :source "(same)"}]
+                  {:new_form "(same)"
+                   :operation "insert_before"
+                   :target-index 1})
+        deleted (issued-edit
+                 "[(same) (same) (same)]"
+                 [{:advertised? true :source "(same)"}
+                  {:advertised? true :source "(same)"}
+                  {:advertised? true :source "(same)"}]
+                 {:operation "delete"
+                  :target-index 1})
+        replaced (issued-edit
+                  "[(same) (middle) (same)]"
+                  [{:advertised? true :source "(same)"}
+                   {:advertised? true :source "(middle)"}
+                   {:advertised? true :source "(same)"}]
+                  {:new_form "(same)"
+                   :operation "replace"
+                   :target-index 1})
+        [insert-left insert-right] (:handles inserted)
+        [delete-left delete-target delete-right] (:handles deleted)
+        [replace-left replace-target replace-right] (:handles replaced)
+        insert-state (get-in inserted [:value :result :state])
+        delete-state (get-in deleted [:value :result :state])
+        replace-state (get-in replaced [:value :result :state])]
+    (is (= {:delete-indices [0 nil 1]
+            :delete-target-reason :deleted
+            :insert-indices [0 2]
+            :replace-indices [0 nil 2]
+            :replace-target-reason :replaced}
+           {:delete-indices (mapv #(active-structural-index delete-state %)
+                                  [delete-left delete-target delete-right])
+            :delete-target-reason (get-in delete-state
+                                          [:retired-handles
+                                           delete-target
+                                           :reason])
+            :insert-indices (mapv #(active-structural-index insert-state %)
+                                  [insert-left insert-right])
+            :replace-indices (mapv #(active-structural-index replace-state %)
+                                   [replace-left replace-target replace-right])
+            :replace-target-reason (get-in replace-state
+                                           [:retired-handles
+                                            replace-target
+                                            :reason])}))))

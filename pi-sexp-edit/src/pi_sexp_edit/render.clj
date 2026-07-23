@@ -112,20 +112,27 @@
             handle))
         (sort-by key (:handles state))))
 
+(defn- record-shown-handle [rendering handle]
+  (update rendering
+          :shown-handles
+          #(if (some #{handle} %) % (conj % handle))))
+
 (defn- handle-for-entry [context rendering entry]
   (if (and (atom-entry? entry) (not (:include-atoms? context)))
     [rendering nil]
     (if-let [handle (existing-handle (:state rendering) entry)]
-      [(assoc rendering
-              :state
-              (handles/advertise-handle (:state rendering) handle))
+      [(-> rendering
+           (assoc :state
+                  (handles/advertise-handle (:state rendering) handle))
+           (record-shown-handle handle))
        handle]
       (let [[allocated handle] (handles/allocate-handle (:state rendering)
                                                         entry)
             advertised        (handles/advertise-handle allocated handle)]
         [(-> rendering
              (assoc :state advertised)
-             (update :created-handles conj handle))
+             (update :created-handles conj handle)
+             (record-shown-handle handle))
          handle]))))
 
 (defn- render-expanded [context rendering entry depth]
@@ -161,6 +168,7 @@
 (defn- render-entries [context state entries depth]
   (loop [entries entries
          rendering {:created-handles []
+                    :shown-handles   []
                     :state           state}
          texts []]
     (if-let [entry (first entries)]
@@ -178,6 +186,7 @@
 
 (defn- result [document rendering header body]
   {:created-handles (:created-handles rendering)
+   :shown-handles   (:shown-handles rendering)
    :source          (:source document)
    :state           (:state rendering)
    :text            (str header "\n\n" body)})
@@ -236,6 +245,18 @@
                (str "document: " (:document-id state)
                     "\ntarget: " target)
                body)))))
+
+(defn render-excerpts
+  "Renders compact annotated `entries` for edit continuation."
+  [document state entries]
+  (let [[rendering text] (render-entries (context document false)
+                                         state
+                                         entries
+                                         2)]
+    {:created-handles (:created-handles rendering)
+     :shown-handles   (:shown-handles rendering)
+     :state           (:state rendering)
+     :text            text}))
 
 (defn- request-options [request]
   (cond-> {}

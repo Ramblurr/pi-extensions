@@ -73,12 +73,17 @@
   - Review: Pi Link review against `5ae1ba0` found one Important touching-patch lexical-boundary bug; safe-join regressions fixed it, and follow-up review found no remaining findings.
   - Contract migrations: Task 11/12 form and repair fixtures now use independent targets because Task 14 rejects insertion relative to replaced boundaries.
 - [x] Task 15: Add local indentation and the reader-syntax preservation corpus
-  - Commit: `edit: preserve local indentation and reader syntax` (this task's commit)
+  - Commit: `a1ddec1 edit: preserve local indentation and reader syntax`
   - Notes: Added parser-indexed indentation, combined-form continuation shifting, multiline insertion alignment, and exact cross-extension reader-syntax fixtures.
   - TDD: RED was 3 behavior failures / 0 errors; GREEN is 41 tests / 41 assertions after shared-boundary CRLF regression coverage.
   - Validation: full Clojure suite 155 tests / 481 assertions; Bun 3 tests; cljfmt, clj-kondo, whitespace, and newline checks pass.
   - Review: Pi Link review against `9f0f953` found one Important same-boundary combination/indentation bug; combine-then-indent fixed it, and follow-up review found no remaining Critical or Important issues.
-- [ ] Task 16: Rebuild post-edit handles and compact changed excerpts
+- [x] Task 16: Rebuild post-edit handles and compact changed excerpts
+  - Commit: `edit: rebuild handles and continuation excerpts` (this task's commit)
+  - Notes: Added candidate-baseline lifecycle rebuilding, explicit replace/delete retirement, operation-aware duplicate path preservation, visible-only handle allocation, compact affected-form excerpts, and advertised/hidden outcome reporting.
+  - TDD: Initial RED was 7 behavior failures / 0 errors; GREEN is 50 tests / 50 assertions after the duplicate-run review regression.
+  - Validation: full Clojure suite 164 tests / 490 assertions; Bun 3 tests; cljfmt, clj-kondo, whitespace, and newline checks pass.
+  - Review: Pi Link review against `a1ddec1` found one Important controlled-duplicate preservation gap; deterministic mutation path transforms fixed insert/delete/replace cases, and follow-up review found no remaining findings.
 - [ ] Task 17: Generate the unified diff for only the extension mutation
 - [ ] Task 18: Add the versioned Babashka JSON entry point
 - [ ] Task 19: Define and register the strict TypeScript tool schemas

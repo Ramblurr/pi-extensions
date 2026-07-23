@@ -355,3 +355,145 @@
      :state          (transitioned-state state
                                          current-document
                                          reconciliation)}))
+
+(defn- path-prefix? [ancestor descendant]
+  (and (<= (count ancestor) (count descendant))
+       (= ancestor (subvec descendant 0 (count ancestor)))))
+
+(defn- explicit-retirements [state edits]
+  (mapcat
+   (fn [edit]
+     (case (:operation edit)
+       :delete
+       (let [target-path (get-in edit [:target-entry :path])]
+         (keep (fn [[handle manifest]]
+                 (when (path-prefix? target-path (:path manifest))
+                   [handle :deleted]))
+               (:handles state)))
+
+       :replace
+       [[(:target edit) :replaced]]
+
+       []))
+   edits))
+
+(defn- force-retirement [state handle reason]
+  (cond
+    (resolve-handle state handle)
+    (retire-handle state handle reason)
+
+    (contains? (:retired-handles state) handle)
+    (assoc-in state [:retired-handles handle :reason] reason)
+
+    :else
+    state))
+
+(defn- destructive-target? [path edit]
+  (and (contains? #{:delete :replace} (:operation edit))
+       (path-prefix? (get-in edit [:target-entry :path]) path)))
+
+(defn- target-parent-path [edit]
+  (let [path (get-in edit [:target-entry :path])]
+    (if (seq path) (pop path) [])))
+
+(defn- structural-index-delta [structural-index edit]
+  (let [operation    (:operation edit)
+        target-index (get-in edit [:target-entry :structural-index])
+        form-count   (count (:forms edit))]
+    (case operation
+      :delete
+      (if (> structural-index target-index) -1 0)
+
+      :insert-after
+      (if (> structural-index target-index) form-count 0)
+
+      :insert-before
+      (if (>= structural-index target-index) form-count 0)
+
+      :replace
+      (if (> structural-index target-index) (dec form-count) 0)
+
+      0)))
+
+(defn- transformed-structural-index [old-parent structural-index edits]
+  (+ structural-index
+     (transduce (comp (filter #(= old-parent (target-parent-path %)))
+                      (map #(structural-index-delta structural-index %)))
+                +
+                0
+                edits)))
+
+(defn- transformed-candidate-path [candidate old-path edits]
+  (loop [candidate-parent []
+         old-parent       []
+         old-edges        old-path]
+    (if-let [old-edge (first old-edges)]
+      (let [structural-index
+            (transformed-structural-index old-parent (:index old-edge) edits)
+            candidate-entry
+            (some #(when (= structural-index (:structural-index %)) %)
+                  (parse/structural-children candidate candidate-parent))]
+        (when candidate-entry
+          (recur (:path candidate-entry)
+                 (conj old-parent old-edge)
+                 (next old-edges))))
+      candidate-parent)))
+
+(defn- exact-entry? [manifest entry]
+  (and entry
+       (= (:concrete-hash manifest) (:concrete-hash entry))
+       (= (:node-tag manifest) (:tag entry))))
+
+(defn- preserve-observed-handle [state handle manifest entry]
+  (-> state
+      (update :retired-handles dissoc handle)
+      (assoc-in [:handles handle]
+                (assoc manifest
+                       :concrete-hash (:concrete-hash entry)
+                       :node-tag (:tag entry)
+                       :path (:path entry)))))
+
+(defn- preserve-deterministic-occurrences
+  [observed-state candidate-state candidate edits]
+  (reduce
+   (fn [state [handle manifest]]
+     (if (some #(destructive-target? (:path manifest) %) edits)
+       state
+       (let [candidate-path (transformed-candidate-path candidate
+                                                        (:path manifest)
+                                                        edits)
+             candidate-entry (when candidate-path
+                               (parse/node-at-path candidate candidate-path))]
+         (if (exact-entry? manifest candidate-entry)
+           (preserve-observed-handle state handle manifest candidate-entry)
+           state))))
+   candidate-state
+   (:handles observed-state)))
+
+(defn reconcile-candidate-state
+  "Reconciles `state` to `candidate-source` and applies explicit edit retirement.
+
+  Reconciliation allocates no handles. Controlled path shifts preserve exact
+  unaffected occurrences even among duplicates. Replacement targets retire even
+  when the candidate subtree is concrete-equal; deletion also retires issued
+  descendants."
+  [observed-state candidate-source edits]
+  (let [{:keys [reconciliation state] :as reconciled}
+        (reconcile-state observed-state candidate-source)
+        candidate (parse/parse-source
+                   candidate-source
+                   {:document-id (:document-id observed-state)})
+        deterministic-state (preserve-deterministic-occurrences
+                             observed-state
+                             state
+                             candidate
+                             edits)
+        candidate-state
+        (-> (reduce (fn [next-state [handle reason]]
+                      (force-retirement next-state handle reason))
+                    deterministic-state
+                    (explicit-retirements observed-state edits))
+            validate-state!)]
+    (assoc reconciled
+           :reconciliation reconciliation
+           :state candidate-state)))
