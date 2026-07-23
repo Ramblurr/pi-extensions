@@ -1,0 +1,11 @@
+{
+  "name": "@ramblurr/pi-usage-report",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Generate aggregate and per-project tool and skill usage reports from Pi session history",
+  "type": "module",
+  "scripts": {
+    "report": "bun run report.js",
+    "test": "bun test"
+  }
+}
