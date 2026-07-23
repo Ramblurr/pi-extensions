@@ -1,0 +1,11 @@
+{:paths ["src"]
+ :deps  {borkdude/parmezan
+         {:git/url "https://github.com/borkdude/parmezan"
+          :git/sha "772feae8ae7fe08cda829033788c677d21599c43"}
+         rewrite-clj/rewrite-clj {:mvn/version "1.2.55"}}
+ :tasks {dev  {:task (shell (str "bb --classpath src"
+                                 java.io.File/pathSeparator
+                                 "test nrepl-server"))}
+         test {:extra-paths ["test"]
+               :requires    ([pi-sexp-edit.test-runner :as test-runner])
+               :task        (apply test-runner/-main *command-line-args*)}}}

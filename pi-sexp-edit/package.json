@@ -1,0 +1,33 @@
+{
+  "name": "@ramblurr/pi-sexp-edit",
+  "version": "0.1.0",
+  "description": "Structural Clojure reading and editing tools for Pi",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "clojure"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "bb.edn",
+    "src/**/*.clj",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "scripts": {
+    "test:clj": "bb test",
+    "test:ts": "bun test test/index.test.ts",
+    "test": "bun run test:clj && bun run test:ts"
+  }
+}
