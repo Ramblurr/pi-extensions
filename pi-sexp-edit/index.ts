@@ -1,8 +1,138 @@
 import { StringEnum, Type, type Static } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const HANDLE_MARKER = "§";
 export const HANDLE_PATTERN = `^${HANDLE_MARKER}[0-9a-z]+$`;
+
+export const BABASHKA_TIMEOUT_MS = 30_000;
+export const MAX_DIAGNOSTIC_BYTES = 16_384;
+export const MAX_PROTOCOL_BYTES = 16 * 1024 * 1024;
+export const BB_CONFIG_PATH = join(dirname(fileURLToPath(import.meta.url)), "bb.edn");
+
+export type OpaqueState = Record<string, unknown> | null;
+
+export interface ProtocolSuccess {
+  ok: true;
+  protocol_version: 1;
+  result: Record<string, unknown>;
+  state: OpaqueState;
+}
+
+export interface ProtocolFailure {
+  error: { code: string; data: Record<string, unknown>; message: string };
+  ok: false;
+  protocol_version: 1;
+  state: OpaqueState;
+}
+
+export type ProtocolEnvelope = ProtocolSuccess | ProtocolFailure;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+}
+
+function invalidProtocol(reason: string): never {
+  throw new Error(`Invalid Babashka protocol response: ${reason}`);
+}
+
+function validateEnvelope(value: unknown): ProtocolEnvelope {
+  if (!isRecord(value)) invalidProtocol("response must be an object");
+  if (value.protocol_version !== 1) invalidProtocol("unsupported protocol version");
+  if (value.ok !== true && value.ok !== false) invalidProtocol("ok must be boolean");
+  if (value.state !== null && !isRecord(value.state)) invalidProtocol("state must be opaque object or null");
+
+  if (value.ok === true) {
+    if (!hasExactKeys(value, ["ok", "protocol_version", "result", "state"])) {
+      invalidProtocol("success envelope fields are not exact");
+    }
+    if (!isRecord(value.result)) invalidProtocol("success result must be an object");
+    return value as unknown as ProtocolSuccess;
+  }
+
+  if (!hasExactKeys(value, ["error", "ok", "protocol_version", "state"])) {
+    invalidProtocol("failure envelope fields are not exact");
+  }
+  if (!isRecord(value.error)) invalidProtocol("failure error must be an object");
+  if (!hasExactKeys(value.error, ["code", "data", "message"])) {
+    invalidProtocol("failure error fields are not exact");
+  }
+  if (typeof value.error.code !== "string" || typeof value.error.message !== "string") {
+    invalidProtocol("failure error code and message must be strings");
+  }
+  if (!isRecord(value.error.data)) invalidProtocol("failure error data must be an object");
+  return value as unknown as ProtocolFailure;
+}
+
+function parseEnvelope(stdout: string): ProtocolEnvelope {
+  if (Buffer.byteLength(stdout) > MAX_PROTOCOL_BYTES) {
+    invalidProtocol(`response exceeds ${MAX_PROTOCOL_BYTES} bytes`);
+  }
+  if (stdout.trim().length === 0) invalidProtocol("response is empty");
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(stdout);
+  } catch {
+    invalidProtocol("stdout must contain exactly one JSON object");
+  }
+  return validateEnvelope(decoded);
+}
+
+function truncateUtf8(value: string, maximumBytes: number): string {
+  const encoded = Buffer.from(value, "utf8");
+  if (encoded.length <= maximumBytes) return value;
+  let end = maximumBytes;
+  while (end > 0) {
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(encoded.subarray(0, end));
+    } catch {
+      end -= 1;
+    }
+  }
+  return "";
+}
+
+export async function invokeBabashka(
+  pi: ExtensionAPI,
+  request: unknown,
+  signal?: AbortSignal,
+): Promise<ProtocolEnvelope> {
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "pi-sexp-edit-"));
+  try {
+    await chmod(temporaryDirectory, 0o700);
+    const requestPath = join(temporaryDirectory, "request.json");
+    await writeFile(requestPath, JSON.stringify(request), {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    await chmod(requestPath, 0o600);
+
+    const result = await pi.exec(
+      "bb",
+      ["--config", BB_CONFIG_PATH, "-m", "pi-sexp-edit.main", "--request", requestPath],
+      { signal, timeout: BABASHKA_TIMEOUT_MS },
+    );
+    if (result.code !== 0 || result.killed) {
+      const diagnostic = truncateUtf8(result.stderr, MAX_DIAGNOSTIC_BYTES);
+      throw new Error(
+        `Babashka exited with code ${result.code}${diagnostic ? `: ${diagnostic}` : ""}`,
+      );
+    }
+    return parseEnvelope(result.stdout);
+  } finally {
+    await rm(temporaryDirectory, { force: true, recursive: true });
+  }
+}
+
 
 const strictObjectOptions = { additionalProperties: false } as const;
 

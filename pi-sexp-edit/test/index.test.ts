@@ -1,8 +1,8 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const optionalSchema = Symbol("optional-schema");
@@ -170,6 +170,42 @@ function propertyNames(schema: unknown): Set<string> {
   };
   visit(schema);
   return names;
+}
+
+interface ExecOptions { signal?: AbortSignal; timeout?: number }
+interface ExecResult { code: number; killed?: boolean; stderr: string; stdout: string }
+type ProcessRunner = (pi: ExtensionAPI, request: unknown, signal?: AbortSignal) => Promise<unknown>;
+
+function processRunner(): ProcessRunner | undefined {
+  return (extensionModule as unknown as { invokeBabashka?: ProcessRunner }).invokeBabashka;
+}
+
+function apiWithExec(
+  execute: (command: string, args: string[], options: ExecOptions) => Promise<ExecResult>,
+): ExtensionAPI {
+  return { exec: execute } as unknown as ExtensionAPI;
+}
+
+async function caught(thunk: () => Promise<unknown>): Promise<Error | undefined> {
+  try {
+    await thunk();
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+}
+
+function successEnvelope(state: unknown = { baseline: "ok" }): string {
+  return JSON.stringify({ ok: true, protocol_version: 1, result: { text: "ok" }, state });
+}
+
+function domainEnvelope(): string {
+  return JSON.stringify({
+    error: { code: "changed", data: {}, message: "changed" },
+    ok: false,
+    protocol_version: 1,
+    state: { baseline: "latest" },
+  });
 }
 
 describe("package", () => {
@@ -377,5 +413,177 @@ describe("package", () => {
       read: ["immutable", "handle", "2,000", "50 kb"].every((term) => read.includes(term)),
       shells: [typeof tools.sexp_read?.execute, typeof tools.sexp_edit?.execute],
     }).toEqual({ edit: true, read: true, shells: ["function", "function"] });
+  });
+
+  test("runner uses package resources, fixed argv, and a private request file", async () => {
+    const run = processRunner();
+    expect(typeof run).toBe("function");
+    if (!run) return;
+    const controller = new AbortController();
+    const request = { source: "secret source ; $(touch /tmp/nope)", state: { secret: true } };
+    let observed: Record<string, unknown> = {};
+    const pi = apiWithExec(async (command, args, options) => {
+      const requestPath = args.at(-1)!;
+      observed = {
+        args, command, options, requestPath,
+        configAbsolute: isAbsolute(args[1]!),
+        contents: JSON.parse(readFileSync(requestPath, "utf8")),
+        existsDuringExec: existsSync(requestPath),
+        mode: statSync(requestPath).mode & 0o777,
+      };
+      return { code: 0, stderr: "", stdout: successEnvelope() };
+    });
+    const response = (await run(pi, request, controller.signal)) as Record<string, unknown>;
+    const args = observed.args as string[];
+    const expectedConfig = join(dirname(fileURLToPath(new URL("../index.ts", import.meta.url))), "bb.edn");
+    expect({
+      argsPrefix: args?.slice(0, 5),
+      command: observed.command,
+      configAbsolute: observed.configAbsolute,
+      configPath: args?.[1],
+      contents: observed.contents,
+      existsAfter: existsSync(observed.requestPath as string),
+      existsDuringExec: observed.existsDuringExec,
+      mode: observed.mode,
+      requestArgContainsSecret: args?.some((arg) => arg.includes("secret source")),
+      responseOk: response.ok,
+      signalForwarded: (observed.options as ExecOptions).signal === controller.signal,
+      timeout: (observed.options as ExecOptions).timeout,
+    }).toEqual({
+      argsPrefix: ["--config", expectedConfig, "-m", "pi-sexp-edit.main", "--request"],
+      command: "bb", configAbsolute: true, configPath: expectedConfig, contents: request,
+      existsAfter: false, existsDuringExec: true, mode: 0o600, requestArgContainsSecret: false,
+      responseOk: true, signalForwarded: true, timeout: extensionModule.BABASHKA_TIMEOUT_MS,
+    });
+  });
+
+  test("request material disappears after every process outcome", async () => {
+    const run = processRunner();
+    expect(typeof run).toBe("function");
+    if (!run) return;
+    const outcomes = [
+      { name: "success", result: { code: 0, stderr: "", stdout: successEnvelope() } },
+      { name: "domain", result: { code: 0, stderr: "", stdout: domainEnvelope() } },
+      { name: "nonzero", result: { code: 2, stderr: "failed", stdout: "" } },
+      { name: "process-error", throws: new Error("spawn failed") },
+      { name: "timeout-rejection", throws: new Error("timed out") },
+      { name: "cancellation-rejection", throws: new Error("aborted") },
+      { name: "timeout-killed", result: { code: 0, killed: true, stderr: "timed out", stdout: "" } },
+      { name: "cancellation-killed", result: { code: 0, killed: true, stderr: "aborted", stdout: "" } },
+    ];
+    const cleaned: Record<string, boolean> = {};
+    for (const outcome of outcomes) {
+      let requestPath = "";
+      const controller = new AbortController();
+      const pi = apiWithExec(async (_command, args) => {
+        requestPath = args.at(-1)!;
+        if (outcome.name.startsWith("cancellation")) controller.abort();
+        if (outcome.throws) throw outcome.throws;
+        return outcome.result!;
+      });
+      await caught(() => run(pi, { source: outcome.name }, controller.signal));
+      cleaned[outcome.name] = requestPath.length > 0 && !existsSync(requestPath);
+    }
+    expect(cleaned).toEqual({
+      "cancellation-killed": true, "cancellation-rejection": true, domain: true,
+      nonzero: true, "process-error": true, success: true,
+      "timeout-killed": true, "timeout-rejection": true,
+    });
+  });
+
+  test("nonzero exits expose only bounded stderr diagnostics", async () => {
+    const run = processRunner();
+    expect(typeof run).toBe("function");
+    if (!run) return;
+    const maximum = extensionModule.MAX_DIAGNOSTIC_BYTES;
+    const error = await caught(() => run(apiWithExec(async () => ({
+      code: 7, stderr: "x".repeat(maximum * 2), stdout: "",
+    })), { source: "x" }));
+    expect({
+      bounded: Buffer.byteLength(error?.message ?? "") <= maximum + 256,
+      hasExitCode: error?.message.includes("7"), maximum,
+    }).toEqual({ bounded: true, hasExitCode: true, maximum: 16_384 });
+  });
+
+  test("empty malformed extra wrong-version missing and oversized responses are rejected", async () => {
+    const run = processRunner();
+    expect(typeof run).toBe("function");
+    if (!run) return;
+    const maximum = extensionModule.MAX_PROTOCOL_BYTES;
+    const outputs = {
+      empty: "", extra: `${successEnvelope()}\ndebug`, malformed: "{",
+      missing: JSON.stringify({ ok: true, protocol_version: 1, result: {} }),
+      oversized: "x".repeat(maximum + 1),
+      wrongVersion: JSON.stringify({ ok: true, protocol_version: 2, result: {}, state: {} }),
+    };
+    const rejected: Record<string, boolean> = {};
+    for (const [name, stdout] of Object.entries(outputs)) {
+      rejected[name] = Boolean(await caught(() => run(
+        apiWithExec(async () => ({ code: 0, stderr: "", stdout })), { source: name },
+      )));
+    }
+    expect({ maximum, rejected }).toEqual({
+      maximum: 16 * 1024 * 1024,
+      rejected: { empty: true, extra: true, malformed: true, missing: true, oversized: true, wrongVersion: true },
+    });
+  });
+
+  test("valid failure envelopes return state and malformed failures are rejected", async () => {
+    const run = processRunner();
+    expect(typeof run).toBe("function");
+    if (!run) return;
+    const valid = JSON.parse(domainEnvelope()) as Record<string, unknown>;
+    const accepted = (await run(
+      apiWithExec(async () => ({ code: 0, stderr: "", stdout: JSON.stringify(valid) })),
+      { source: "domain" },
+    )) as Record<string, unknown>;
+    const validError = valid.error as Record<string, unknown>;
+    const malformed = {
+      errorCodeType: { ...valid, error: { ...validError, code: 7 } },
+      errorDataType: { ...valid, error: { ...validError, data: [] } },
+      errorExtra: { ...valid, error: { ...validError, extra: true } },
+      errorMessageType: { ...valid, error: { ...validError, message: 7 } },
+      errorMissing: { ...valid, error: { code: "changed", message: "changed" } },
+      stateType: { ...valid, state: [] },
+      topExtra: { ...valid, extra: true },
+      topMissing: { error: valid.error, ok: false, protocol_version: 1 },
+    };
+    const rejected: Record<string, boolean> = {};
+    for (const [name, envelope] of Object.entries(malformed)) {
+      rejected[name] = Boolean(await caught(() => run(
+        apiWithExec(async () => ({ code: 0, stderr: "", stdout: JSON.stringify(envelope) })),
+        { source: name },
+      )));
+    }
+    expect({ ok: accepted.ok, rejected, state: accepted.state }).toEqual({
+      ok: false,
+      rejected: {
+        errorCodeType: true, errorDataType: true, errorExtra: true, errorMessageType: true,
+        errorMissing: true, stateType: true, topExtra: true, topMissing: true,
+      },
+      state: { baseline: "latest" },
+    });
+  });
+
+
+  test("opaque state is returned only after the full envelope validates", async () => {
+    const run = processRunner();
+    expect(typeof run).toBe("function");
+    if (!run) return;
+    const state = { handles: { "§1": { hidden: "opaque" } }, token: "trusted-only-after-validation" };
+    const accepted = (await run(
+      apiWithExec(async () => ({ code: 0, stderr: "", stdout: successEnvelope(state) })),
+      { source: "valid" },
+    )) as { state: unknown };
+    const rejected = await caught(() => run(
+      apiWithExec(async () => ({
+        code: 0, stderr: "",
+        stdout: JSON.stringify({ extra: true, ok: true, protocol_version: 1, result: {}, state }),
+      })),
+      { source: "invalid" },
+    ));
+    expect({ accepted: accepted.state, invalidRejected: Boolean(rejected) }).toEqual({
+      accepted: state, invalidRejected: true,
+    });
   });
 });
