@@ -1,0 +1,71 @@
+# Durable operating instructions
+
+- Repository root: `/home/ramblurr/src/github.com/ramblurr/pi-extensions`
+- Project path: `/home/ramblurr/src/github.com/ramblurr/pi-extensions/pi-sexp-edit`
+- `README.md` is the authoritative release contract.
+- Before every Clojure-family or EDN edit, verify the project nREPL with `brepl '(+ 1 2)'`. After every edit, reload every edited namespace and exercise the relevant behavior through `brepl`.
+- Follow strict all-tests-first TDD for each numbered task: add every task test, demonstrate behavior-based RED without load errors, then implement minimally.
+- Never touch, stage, or commit the unrelated parent-level `../.gitignore` modification.
+- Modify only files authorized by the current task and use the exact planned commit message.
+- Run the task's focused tests, the full Clojure suite, Bun tests, formatter, linter, and whitespace checks before each commit.
+- Request review before every task commit and fix every Critical and Important finding. Request follow-up review after such fixes.
+- All code review must be performed through Pi Link, never through tmux.
+- The reviewer `pi-sexp-edit-reviewer` is standing by. Use `link_prompt` for synchronous reviews.
+- Update this progress file at the end of every task.
+
+# Task progress
+
+- [x] Task 1: Scaffold the package and both test runners
+  - Commit: `90c464c package: scaffold pi-sexp-edit`
+  - Notes: Established pinned Babashka dependencies, package metadata, and Clojure/Bun test runners.
+- [x] Task 2: Parse complete files and enumerate structural children
+  - Commit: `66bb1ed parse: index concrete syntax nodes`
+  - Notes: Added exact-source parsing, concrete-node indexing, structural roles, and path lookup.
+- [x] Task 3: Add framed concrete hashes and occurrence addresses
+  - Commit: `78f4b9c hashes: add concrete hashes and addresses`
+  - Notes: Added domain-separated concrete hashes, snapshot addresses, and fingerprints.
+- [x] Task 4: Add immutable handle allocation and opaque state
+  - Commit: `75f7579 handles: add immutable handle lifecycle`
+  - Notes: Added monotonic base-36 handles, advertisement, permanent retirement, and JSON-safe state.
+- [x] Task 5: Reconcile equal trees and simple changed containers
+  - Commit: `620488c reconcile: preserve equal and simple changed subtrees`
+  - Notes: Preserves exact subtrees and recursively inspects compatible changed containers.
+- [x] Task 6: Add unique anchors, named declarations, and safe reorder matching
+  - Commit: `94db6cb reconcile: add unique anchors and declaration keys`
+  - Notes: Added parent-local unique hashes, named declaration keys, and safe reorder evidence.
+- [x] Task 7: Prove ambiguity for duplicate sequence alignments
+  - Commit: `6fac21d reconcile: reject ambiguous duplicate mappings`
+  - Notes: Added exhaustive optimal-alignment analysis and conservative duplicate retirement.
+- [x] Task 8: Apply reconciliation to handle lifecycle and verify state integrity
+  - Commit: `c197a89 reconcile: enforce lifecycle and state integrity`
+  - Notes: Added fail-closed state validation and complete preserved/changed/deleted/ambiguous transitions.
+- [x] Task 9: Render collapsed and expanded annotated structures
+  - Commit: `6520125 read: render structural handles`
+  - Notes: Added pure depth-aware rendering; annotations allocate only visible handles and never alter source.
+- [x] Task 10: Orchestrate open, refresh, and target reads in Clojure
+  - Commit: `2b9a9ad read: reconcile document snapshots`
+  - Notes: Added versioned read envelopes, state reconciliation, target errors, and last-good-state preservation.
+  - Validation: focused read suite 20 tests / 20 assertions; full Clojure suite 105 tests / 431 assertions; Bun 3 tests.
+- [x] Task 11: Validate edit operations and supplied forms
+  - Commit: `validation: validate edit batches and forms` (this task's commit)
+  - Notes: Added defense-in-depth operation validation, supplied-form sequence parsing, exact active-handle token rejection, and reconciled pre-edit target resolution.
+  - TDD: RED was 13 behavior failures / 0 errors; GREEN is 13 tests / 13 assertions.
+  - Validation: full Clojure suite 118 tests / 444 assertions; Bun 3 tests; cljfmt, clj-kondo, whitespace, and newline checks pass.
+  - Review: Pi Link review against `2b9a9ad` found no Critical or Important issues; its one Minor cross-document fixture finding was fixed, and follow-up review approved the task.
+- [ ] Task 12: Add reported Parmezan delimiter repair
+- [ ] Task 13: Implement each single structural edit operation
+- [ ] Task 14: Enforce transactional batch semantics and conflicts
+- [ ] Task 15: Add local indentation and the reader-syntax preservation corpus
+- [ ] Task 16: Rebuild post-edit handles and compact changed excerpts
+- [ ] Task 17: Generate the unified diff for only the extension mutation
+- [ ] Task 18: Add the versioned Babashka JSON entry point
+- [ ] Task 19: Define and register the strict TypeScript tool schemas
+- [ ] Task 20: Add secure, cancellable Babashka process invocation
+- [ ] Task 21: Canonicalize paths and manage process-local documents
+- [ ] Task 22: Wire `sexp_read` through the registry and Babashka
+- [ ] Task 23: Add queued atomic `sexp_edit` file replacement
+- [ ] Task 24: Format bounded results and structured errors
+- [ ] Task 25: Harden cancellation, timeout, concurrency, and write failures
+- [ ] Task 26: Add read and reconciliation acceptance workflows
+- [ ] Task 27: Add transaction, repair, comment, and reload acceptance workflows
+- [ ] Task 28: Audit packaging, documentation, and the release contract
