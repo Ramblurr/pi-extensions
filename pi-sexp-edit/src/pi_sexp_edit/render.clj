@@ -2,7 +2,8 @@
   (:require
    [clojure.string :as str]
    [pi-sexp-edit.handles :as handles]
-   [pi-sexp-edit.parse :as parse]))
+   [pi-sexp-edit.parse :as parse]
+   [pi-sexp-edit.protocol :as protocol]))
 
 (def ^:private opening-defaults
   {:depth 0
@@ -235,3 +236,62 @@
                (str "document: " (:document-id state)
                     "\ntarget: " target)
                body)))))
+
+(defn- request-options [request]
+  (cond-> {}
+    (contains? request :depth)
+    (assoc :depth (:depth request))
+
+    (contains? request :include-atoms?)
+    (assoc :include-atoms? (:include-atoms? request))))
+
+(defn- observed-state [{:keys [canonical-path document-id source state]}]
+  (if state
+    (:state (handles/reconcile-state state source))
+    (handles/initial-state document-id canonical-path source)))
+
+(defn- retired-code [reason]
+  (if (= :replaced reason) :changed reason))
+
+(defn- target-error [state target]
+  (when-not (handles/resolve-handle state target)
+    (if-let [retired (get-in state [:retired-handles target])]
+      {:code    (retired-code (:reason retired))
+       :data    {:target target}
+       :message (str "Handle " target " is retired")}
+      {:code    :unknown
+       :data    {:target target}
+       :message (str "Unknown handle " target)})))
+
+(defn- rendered-read [request document state]
+  (let [options  (request-options request)
+        rendered (if-let [target (:target request)]
+                   (render-target document state target options)
+                   (render-opening document state options))]
+    (protocol/success (select-keys rendered [:created-handles :text])
+                      (:state rendered))))
+
+(defn- successful-read [request]
+  (let [state    (observed-state request)
+        document (parse/parse-source (:source request)
+                                     {:document-id (:document-id state)})]
+    (if-let [error (some->> (:target request) (target-error state))]
+      (protocol/failure error state)
+      (rendered-read request document state))))
+
+(defn read-source
+  "Reads current source, reconciling an optional prior `:state`.
+
+  Returns a versioned success or represented read-error envelope. The caller
+  supplies `:document-id` and `:canonical-path` when opening a document."
+  [request]
+  (try
+    (successful-read request)
+    (catch Exception exception
+      (let [data (ex-data exception)]
+        (if (= :parse-error (:code data))
+          (protocol/failure {:code    :parse-error
+                             :data    (dissoc data :code)
+                             :message (ex-message exception)}
+                            (:state request))
+          (throw exception))))))

@@ -1,5 +1,6 @@
 (ns pi-sexp-edit.read-test
   (:require
+   [cheshire.core :as json]
    [clojure.string :as str]
    [clojure.test :refer [deftest is]]
    [pi-sexp-edit.handles :as handles]
@@ -261,3 +262,195 @@
             :result-source   (:source result)
             :source-has-marker? (str/includes? (:source result)
                                                handles/handle-marker)}))))
+
+(defn- read-request [source]
+  {:canonical-path "src/example.clj"
+   :document-id    "D4"
+   :source         source})
+
+(deftest opening-request-creates-document-state-and-collapsed-result
+  (let [source   "(ns example.core)\n(def value 1)"
+        response (sut/read-source (read-request source))
+        state    (:state response)]
+    (is (= {:active-handles #{"§1" "§2"}
+            :response       {:ok true
+                             :protocol_version 1
+                             :result
+                             {:created-handles ["§1" "§2"]
+                              :text (str "document: D4\n"
+                                         "path: src/example.clj\n\n"
+                                         "§1 (ns example.core ...)\n"
+                                         "§2 (def value ...)")}}
+            :response-keys  #{:ok :protocol_version :result :state}
+            :state          {:baseline-source source
+                             :canonical-path "src/example.clj"
+                             :document-id "D4"
+                             :next-handle-id 3
+                             :retired-handles {}}}
+           {:active-handles (advertised-handles state)
+            :response       (select-keys response
+                                         [:ok :protocol_version :result])
+            :response-keys  (set (keys response))
+            :state          (dissoc state :handles)}))))
+
+(deftest refreshing-changed-source-preserves-identity-and-commits-baseline
+  (let [old-source "(defn alpha [] :old)"
+        new-source "(defn alpha [] :new)"
+        opened     (sut/read-source (read-request old-source))
+        refreshed  (sut/read-source {:source new-source
+                                     :state  (:state opened)})
+        state      (:state refreshed)]
+    (is (= {:active-handles #{"§2"}
+            :baseline-source new-source
+            :created-handles ["§2"]
+            :document-id "D4"
+            :next-handle-id 3
+            :retired-reasons {"§1" :changed}
+            :text (str "document: D4\n"
+                       "path: src/example.clj\n\n"
+                       "§2 (defn alpha [] ...)")}
+           {:active-handles (advertised-handles state)
+            :baseline-source (:baseline-source state)
+            :created-handles (get-in refreshed [:result :created-handles])
+            :document-id (:document-id state)
+            :next-handle-id (:next-handle-id state)
+            :retired-reasons (update-vals (:retired-handles state) :reason)
+            :text (get-in refreshed [:result :text])}))))
+
+(deftest refreshing-unrelated-change-preserves-unaffected-handle
+  (let [old-source (str "(defn alpha [] :old)\n"
+                        "(defn beta [] :same)")
+        new-source (str "(defn alpha [] :new)\n"
+                        "(defn beta [] :same)")
+        opened     (sut/read-source (read-request old-source))
+        old-beta   (get-in opened [:state :handles "§2"])
+        refreshed  (sut/read-source {:source new-source
+                                     :state  (:state opened)})
+        state      (:state refreshed)]
+    (is (= {:active-handles #{"§2" "§3"}
+            :beta-manifest old-beta
+            :created-handles ["§3"]
+            :retired-reasons {"§1" :changed}
+            :text (str "document: D4\n"
+                       "path: src/example.clj\n\n"
+                       "§3 (defn alpha [] ...)\n"
+                       "§2 (defn beta [] ...)")}
+           {:active-handles (advertised-handles state)
+            :beta-manifest (get-in state [:handles "§2"])
+            :created-handles (get-in refreshed [:result :created-handles])
+            :retired-reasons (update-vals (:retired-handles state) :reason)
+            :text (get-in refreshed [:result :text])}))))
+
+(deftest target-request-uses-inspection-depth-default
+  (let [source (str "(defn calculate-total [x]\n"
+                    "  (let [fee (fee-for x)]\n"
+                    "    (+ x fee)))")
+        opened (sut/read-source (read-request source))
+        target (first (get-in opened [:result :created-handles]))
+        inspected (sut/read-source {:source source
+                                    :state  (:state opened)
+                                    :target target})]
+    (is (= {:active-handles #{"§1" "§2" "§3" "§4" "§5"}
+            :created-handles ["§2" "§3" "§4" "§5"]
+            :text (str "document: D4\n"
+                       "target: §1\n\n"
+                       "§1 (defn calculate-total §2 [x]\n"
+                       "  §3 (let §4 [...]\n"
+                       "    §5 (+ ...)))")}
+           {:active-handles (advertised-handles (:state inspected))
+            :created-handles (get-in inspected [:result :created-handles])
+            :text (get-in inspected [:result :text])}))))
+
+(deftest unknown-and-retired-targets-return-structured-errors
+  (let [source "(target)"
+        opened (sut/read-source (read-request source))
+        state  (:state opened)
+        unknown (sut/read-source {:source source
+                                  :state  state
+                                  :target "§z"})
+        retired (sut/read-source {:source "(changed)"
+                                  :state  state
+                                  :target "§1"})]
+    (is (= {:retired {:error {:code :changed
+                              :data {:target "§1"}
+                              :message "Handle §1 is retired"}
+                      :ok false
+                      :protocol_version 1}
+            :retired-baseline "(changed)"
+            :retired-reason :changed
+            :unknown {:error {:code :unknown
+                              :data {:target "§z"}
+                              :message "Unknown handle §z"}
+                      :ok false
+                      :protocol_version 1}
+            :unknown-state-unchanged? true}
+           {:retired (dissoc retired :state)
+            :retired-baseline (get-in retired [:state :baseline-source])
+            :retired-reason (get-in retired
+                                    [:state :retired-handles "§1" :reason])
+            :unknown (dissoc unknown :state)
+            :unknown-state-unchanged? (= state (:state unknown))}))))
+
+(deftest malformed-current-source-keeps-last-good-state
+  (let [source "(stable)"
+        opened (sut/read-source (read-request source))
+        old-state (:state opened)
+        malformed (sut/read-source {:source "("
+                                    :state  old-state})]
+    (is (= {:error {:code :parse-error
+                    :data {:col 2
+                           :row 1
+                           :source-length 1}
+                    :message "Unable to parse complete Clojure source"}
+            :ok false
+            :protocol_version 1
+            :state-unchanged? true}
+           {:error (:error malformed)
+            :ok (:ok malformed)
+            :protocol_version (:protocol_version malformed)
+            :state-unchanged? (= old-state (:state malformed))}))))
+
+(deftest read-result-exposes-no-source-hash-or-revision
+  (let [response (sut/read-source (read-request "(stable)"))
+        result   (:result response)]
+    (is (= {:public-result-keys #{:created-handles :text}
+            :response-result result
+            :revision nil
+            :source nil
+            :source-hash nil}
+           {:public-result-keys (set (keys result))
+            :response-result result
+            :revision (:revision result)
+            :source (:source result)
+            :source-hash (:source-hash result)}))))
+
+(deftest read-response-contract-is-json-safe
+  (let [response (sut/read-source (read-request "(stable)"))
+        decoded  (json/parse-string (json/generate-string response))]
+    (is (= {"active-handle-status" "active"
+            "document-id" "D4"
+            "ok" true
+            "protocol_version" 1
+            "result-keys" #{"created-handles" "text"}}
+           {"active-handle-status" (get-in decoded
+                                           ["state"
+                                            "handles"
+                                            "§1"
+                                            "status"])
+            "document-id" (get-in decoded ["state" "document-id"])
+            "ok" (get decoded "ok")
+            "protocol_version" (get decoded "protocol_version")
+            "result-keys" (set (keys (get decoded "result")))}))))
+
+(deftest read-failure-contract-is-json-safe
+  (let [response (sut/read-source (read-request "("))
+        decoded  (json/parse-string (json/generate-string response))]
+    (is (= {"error" {"code" "parse-error"
+                     "data" {"col" 2
+                             "row" 1
+                             "source-length" 1}
+                     "message" "Unable to parse complete Clojure source"}
+            "ok" false
+            "protocol_version" 1
+            "state" nil}
+           decoded))))
