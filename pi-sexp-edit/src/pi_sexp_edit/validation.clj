@@ -3,7 +3,8 @@
    [clojure.set :as set]
    [clojure.string :as str]
    [pi-sexp-edit.handles :as handles]
-   [pi-sexp-edit.parse :as parse]))
+   [pi-sexp-edit.parse :as parse]
+   [pi-sexp-edit.repair :as repair]))
 
 (def ^:private operation-fields
   #{:new_form :operation :target})
@@ -97,23 +98,32 @@
       (assoc edit :target-entry entry))))
 
 (defn- parsed-forms [state edit-index source]
-  (let [document
+  (let [{:keys [document] :as parsed}
         (try
-          (parse/parse-source source)
+          (repair/parse-supplied source)
           (catch Exception exception
-            (if (= :parse-error (:code (ex-data exception)))
+            (case (:code (ex-data exception))
+              :parse-error
               (throw (invalid-form state
                                    :invalid-supplied-form
                                    {:edit-index  edit-index
                                     :parse-error (dissoc (ex-data exception)
                                                          :code)}))
+
+              :repair-failed
+              (throw (ex-info (ex-message exception)
+                              (assoc (ex-data exception)
+                                     :edit-index edit-index
+                                     :state state)
+                              exception))
+
               (throw exception))))
         forms (parse/structural-children document [])]
     (when (empty? forms)
       (throw (invalid-form state
                            :invalid-supplied-form
                            {:edit-index edit-index})))
-    [document forms]))
+    (assoc parsed :forms forms)))
 
 (defn- copied-active-handle [state supplied-document]
   (let [active-handles (set (keys (:handles state)))]
@@ -124,14 +134,21 @@
           (:nodes supplied-document))))
 
 (defn- validate-supplied-forms [state edit-index edit]
-  (if-let [source (:new-form edit)]
-    (let [[document forms] (parsed-forms state edit-index source)]
+  (if-let [supplied-source (:new-form edit)]
+    (let [{:keys [document forms repair source]}
+          (parsed-forms state edit-index supplied-source)]
       (when-let [handle (copied-active-handle state document)]
         (throw (invalid-form state
                              :active-handle-token
                              {:edit-index edit-index
                               :handle     handle})))
-      (assoc edit :forms forms))
+      (cond-> (assoc edit
+                     :forms forms
+                     :new-form source)
+        repair (assoc :repair
+                      (assoc repair
+                             :edit-index edit-index
+                             :target (:target edit)))))
     edit))
 
 (defn validate-edit-request
@@ -161,4 +178,5 @@
     {:document                     document
      :edits                        validated-edits
      :external-changes-reconciled? external-changes?
+     :repairs                      (into [] (keep :repair) validated-edits)
      :state                        observed-state}))

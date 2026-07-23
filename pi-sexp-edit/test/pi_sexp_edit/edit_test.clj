@@ -141,11 +141,10 @@
             :target-sources (mapv (comp :source :target-entry)
                                   (:edits result))}))))
 
-(deftest malformed-and-formless-supplied-text-is-invalid
+(deftest non-delimiter-invalid-and-formless-supplied-text-is-invalid
   (let [source  "(target)"
         state   (opened-state source)
-        supplied-texts ["(incomplete"
-                        "{:odd}"
+        supplied-texts ["{:odd}"
                         "^42 value"
                         "#foo/"
                         "; comment only\n"]]
