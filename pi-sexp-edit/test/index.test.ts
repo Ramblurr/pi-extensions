@@ -239,6 +239,46 @@ function registryFactory(): (() => TestRegistry) | undefined {
     .createDocumentRegistry;
 }
 
+interface RuntimeDependencies {
+  invokeBabashka: (pi: ExtensionAPI, request: unknown, signal?: AbortSignal) => Promise<unknown>;
+}
+
+type RuntimeFactory = (pi: ExtensionAPI, dependencies: RuntimeDependencies) => void;
+
+function runtimeFactory(): RuntimeFactory | undefined {
+  return (extensionModule as unknown as { createSexpExtension?: RuntimeFactory }).createSexpExtension;
+}
+
+function captureRuntimeTools(dependencies: RuntimeDependencies): CapturedTool[] {
+  const factory = runtimeFactory();
+  if (!factory) return [];
+  const tools: CapturedTool[] = [];
+  factory({
+    async exec() { throw new Error("unexpected real exec"); },
+    registerTool(tool: CapturedTool) { tools.push(tool); },
+  } as unknown as ExtensionAPI, dependencies);
+  return tools;
+}
+
+async function executeReadTool(
+  tool: CapturedTool | undefined,
+  parameters: unknown,
+  cwd: string,
+  signal = new AbortController().signal,
+): Promise<Record<string, unknown>> {
+  if (!tool?.execute) throw new Error("sexp_read is not registered");
+  return await tool.execute("call", parameters, signal, undefined, { cwd }) as Record<string, unknown>;
+}
+
+function readSuccess(state: unknown, text = "§1 (value)"): unknown {
+  return {
+    ok: true,
+    protocol_version: 1,
+    result: { hash: "must-not-leak", revision: 42, text },
+    state,
+  };
+}
+
 describe("package", () => {
   test("loads the extension factory", () => {
     expect(typeof extension).toBe("function");
@@ -805,5 +845,261 @@ describe("package", () => {
     } finally {
       rmSync(directory, { force: true, recursive: true });
     }
+  });
+
+  test("opening and reopening send latest source and commit only successful state", async () => {
+    const createRuntime = runtimeFactory();
+    expect(typeof createRuntime).toBe("function");
+    if (!createRuntime) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-read-"));
+    try {
+      const path = join(directory, "sample.clj");
+      writeFileSync(path, "(one)");
+      const requests: Array<Record<string, unknown>> = [];
+      const tools = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          requests.push(request as Record<string, unknown>);
+          return readSuccess({ generation: requests.length }, `§1 (rendered-${requests.length})`);
+        },
+      });
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const first = await executeReadTool(read, { path }, directory);
+      writeFileSync(path, "(two)");
+      const second = await executeReadTool(read, { path }, directory);
+      const firstPayload = requests[0]?.request as Record<string, unknown>;
+      const secondPayload = requests[1]?.request as Record<string, unknown>;
+      expect({
+        firstDepth: firstPayload.depth,
+        firstHasState: Object.hasOwn(firstPayload, "state"),
+        firstSource: firstPayload.source,
+        noHashOrRevision: !JSON.stringify(first).includes("hash") && !JSON.stringify(first).includes("revision"),
+        outputs: [first.content, second.content],
+        secondSource: secondPayload.source,
+        secondState: secondPayload.state,
+        rootKeys: Object.keys(requests[0] ?? {}).sort(),
+        rootOperation: requests[0]?.operation,
+        rootVersion: requests[0]?.protocol_version,
+      }).toEqual({
+        firstDepth: 0, firstHasState: false, firstSource: "(one)", noHashOrRevision: true,
+        outputs: [[{ type: "text", text: "§1 (rendered-1)" }], [{ type: "text", text: "§1 (rendered-2)" }]],
+        rootKeys: ["operation", "protocol_version", "request"],
+        rootOperation: "read", rootVersion: 1,
+        secondSource: "(two)", secondState: { generation: 1 },
+      });
+    } finally { rmSync(directory, { force: true, recursive: true }); }
+  });
+
+  test("failed opening leaves state absent for retry", async () => {
+    const createRuntime = runtimeFactory();
+    expect(typeof createRuntime).toBe("function");
+    if (!createRuntime) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-read-"));
+    try {
+      const path = join(directory, "sample.clj");
+      writeFileSync(path, "(source)");
+      const requests: Array<Record<string, unknown>> = [];
+      let attempt = 0;
+      const read = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          requests.push(request as Record<string, unknown>);
+          attempt += 1;
+          if (attempt === 1) throw new Error("process failed");
+          return readSuccess({ good: true });
+        },
+      }).find(({ name }) => name === "sexp_read");
+      await caught(() => executeReadTool(read, { path }, directory));
+      await executeReadTool(read, { path }, directory);
+      expect(requests.map(({ request }) => Object.hasOwn(request as object, "state")))
+        .toEqual([false, false]);
+    } finally { rmSync(directory, { force: true, recursive: true }); }
+  });
+
+  test("inspection uses stored canonical path and read option defaults", async () => {
+    const createRuntime = runtimeFactory();
+    expect(typeof createRuntime).toBe("function");
+    if (!createRuntime) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-read-"));
+    try {
+      const source = join(directory, "source.clj");
+      const alias = join(directory, "alias.clj");
+      writeFileSync(source, "(source)");
+      symlinkSync(source, alias);
+      const requests: Array<Record<string, unknown>> = [];
+      const read = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          requests.push(request as Record<string, unknown>);
+          return readSuccess({ generation: requests.length });
+        },
+      }).find(({ name }) => name === "sexp_read");
+      await executeReadTool(read, { path: alias }, directory);
+      rmSync(alias);
+      await executeReadTool(read, { document: "D1", target: "§1" }, "/wrong/cwd");
+      await executeReadTool(read, { depth: 7, document: "D1", include_atoms: true, target: "§1" }, "/wrong/cwd");
+      await executeReadTool(read, { document: "D1" }, "/wrong/cwd");
+      const payloads = requests.map(({ request }) => request as Record<string, unknown>);
+      expect({
+        atomOptions: payloads.map((payload) => payload["include-atoms?"]),
+        canonicalPaths: payloads.map((payload) => payload["canonical-path"]),
+        depths: payloads.map((payload) => payload.depth),
+        documents: payloads.map((payload) => payload["document-id"]),
+        targets: payloads.map((payload) => payload.target ?? null),
+      }).toEqual({
+        atomOptions: [false, false, true, false],
+        canonicalPaths: [realpathSync(source), realpathSync(source), realpathSync(source), realpathSync(source)],
+        depths: [0, 2, 7, 0], documents: ["D1", "D1", "D1", "D1"],
+        targets: [null, "§1", "§1", null],
+      });
+    } finally { rmSync(directory, { force: true, recursive: true }); }
+  });
+
+  test("malformed source preserves good state and successful reconciliation commits", async () => {
+    const createRuntime = runtimeFactory();
+    expect(typeof createRuntime).toBe("function");
+    if (!createRuntime) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-read-"));
+    try {
+      const path = join(directory, "sample.clj");
+      writeFileSync(path, "(good)");
+      const good = { generation: "good" };
+      const reconciled = { generation: "reconciled" };
+      const requests: Array<Record<string, unknown>> = [];
+      const responses = [
+        readSuccess(good),
+        { error: { code: "parse-error", data: {}, message: "bad" }, ok: false, protocol_version: 1, state: { generation: "poison" } },
+        readSuccess(reconciled),
+        readSuccess({ generation: "final" }),
+      ];
+      const read = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          requests.push(request as Record<string, unknown>);
+          return responses.shift();
+        },
+      }).find(({ name }) => name === "sexp_read");
+      await executeReadTool(read, { path }, directory);
+      writeFileSync(path, "(");
+      await caught(() => executeReadTool(read, { path }, directory));
+      writeFileSync(path, "(externally-changed)");
+      await executeReadTool(read, { path }, directory);
+      await executeReadTool(read, { document: "D1" }, directory);
+      const states = requests.map(({ request }) => (request as Record<string, unknown>).state ?? null);
+      expect(states).toEqual([null, good, good, reconciled]);
+    } finally { rmSync(directory, { force: true, recursive: true }); }
+  });
+
+  test("target observation failures commit retirement state and prevent resurrection", async () => {
+    const createRuntime = runtimeFactory();
+    expect(typeof createRuntime).toBe("function");
+    if (!createRuntime) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-read-"));
+    try {
+      const path = join(directory, "sample.clj");
+      writeFileSync(path, "(foo)");
+      const active = { handles: { "§1": { status: "active" } } };
+      const retired = { handles: {}, retired: { "§1": { reason: "changed" } } };
+      const requests: Array<Record<string, unknown>> = [];
+      const responses = [
+        readSuccess(active),
+        { error: { code: "changed", data: { target: "§1" }, message: "changed" }, ok: false, protocol_version: 1, state: retired },
+        { error: { code: "changed", data: { target: "§1" }, message: "retired" }, ok: false, protocol_version: 1, state: retired },
+      ];
+      const read = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          requests.push(request as Record<string, unknown>);
+          return responses.shift();
+        },
+      }).find(({ name }) => name === "sexp_read");
+      await executeReadTool(read, { path }, directory);
+      writeFileSync(path, "(bar)");
+      await caught(() => executeReadTool(read, { document: "D1", target: "§1" }, directory));
+      writeFileSync(path, "(foo)");
+      await caught(() => executeReadTool(read, { document: "D1", target: "§1" }, directory));
+      const states = requests.map(({ request }) => (request as Record<string, unknown>).state ?? null);
+      expect(states).toEqual([null, active, retired]);
+    } finally { rmSync(directory, { force: true, recursive: true }); }
+  });
+
+  test("invalid UTF-8 fails before Babashka and does not establish state", async () => {
+    const createRuntime = runtimeFactory();
+    expect(typeof createRuntime).toBe("function");
+    if (!createRuntime) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-read-"));
+    try {
+      const path = join(directory, "sample.clj");
+      writeFileSync(path, Buffer.from([0x28, 0xff, 0x29]));
+      const requests: Array<Record<string, unknown>> = [];
+      const read = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          requests.push(request as Record<string, unknown>);
+          return readSuccess({ good: true });
+        },
+      }).find(({ name }) => name === "sexp_read");
+      const invalid = await caught(() => executeReadTool(read, { path }, directory));
+      writeFileSync(path, "\ufeff(valid)");
+      await executeReadTool(read, { path }, directory);
+      const payload = requests[0]?.request as Record<string, unknown>;
+      expect({
+        invalidRejected: Boolean(invalid),
+        requests: requests.length,
+        retryHasState: Object.hasOwn(payload, "state"),
+        sourcePreservesBom: payload.source === "\ufeff(valid)",
+      }).toEqual({
+        invalidRejected: true, requests: 1, retryHasState: false, sourcePreservesBom: true,
+      });
+    } finally { rmSync(directory, { force: true, recursive: true }); }
+  });
+
+
+  test("same-document reads serialize while different documents overlap", async () => {
+    const createRuntime = runtimeFactory();
+    expect(typeof createRuntime).toBe("function");
+    if (!createRuntime) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-read-"));
+    try {
+      const firstPath = join(directory, "first.clj");
+      const secondPath = join(directory, "second.clj");
+      writeFileSync(firstPath, "(first)");
+      writeFileSync(secondPath, "(second)");
+      let handler: (request: Record<string, unknown>) => Promise<unknown> = async () => readSuccess({ open: true });
+      const read = captureRuntimeTools({
+        async invokeBabashka(_pi, request) { return handler(request as Record<string, unknown>); },
+      }).find(({ name }) => name === "sexp_read");
+      await executeReadTool(read, { path: firstPath }, directory);
+      await executeReadTool(read, { path: secondPath }, directory);
+
+      let sameCalls = 0;
+      let releaseSame!: () => void;
+      let firstEntered!: () => void;
+      const sameGate = new Promise<void>((resolve) => { releaseSame = resolve; });
+      const entered = new Promise<void>((resolve) => { firstEntered = resolve; });
+      handler = async () => {
+        sameCalls += 1;
+        if (sameCalls === 1) { firstEntered(); await sameGate; }
+        return readSuccess({ sameCalls });
+      };
+      const one = executeReadTool(read, { document: "D1" }, directory);
+      await entered;
+      const two = executeReadTool(read, { document: "D1" }, directory);
+      await Bun.sleep(5);
+      const queuedCalls = sameCalls;
+      releaseSame();
+      await Promise.all([one, two]);
+
+      let active = 0;
+      let maximumActive = 0;
+      let barrierCount = 0;
+      let releaseBarrier!: () => void;
+      const barrier = new Promise<void>((resolve) => { releaseBarrier = resolve; });
+      handler = async () => {
+        active += 1; maximumActive = Math.max(maximumActive, active); barrierCount += 1;
+        if (barrierCount === 2) releaseBarrier();
+        await barrier; active -= 1;
+        return readSuccess({ parallel: true });
+      };
+      await Promise.all([
+        executeReadTool(read, { document: "D1" }, directory),
+        executeReadTool(read, { document: "D2" }, directory),
+      ]);
+      expect({ maximumActive, queuedCalls }).toEqual({ maximumActive: 2, queuedCalls: 1 });
+    } finally { rmSync(directory, { force: true, recursive: true }); }
   });
 });

@@ -1,6 +1,6 @@
 import { StringEnum, Type, type Static } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { chmod, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile as readFileBytes, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -380,19 +380,89 @@ const editDescription =
   "Missing delimiters may be repaired only when unambiguous, and every repair is reported. " +
   "Returns affected handles, a unified diff, and continuation excerpts capped at 2,000 lines or 50 KB.";
 
+export interface SexpExtensionDependencies {
+  invokeBabashka: typeof invokeBabashka;
+  readFile(path: string): Promise<Uint8Array>;
+}
+
+export class SexpDomainError extends Error {
+  readonly code: string;
+  readonly data: Record<string, unknown>;
+  readonly state: OpaqueState;
+
+  constructor(error: ProtocolFailure["error"], state: OpaqueState) {
+    super(error.message);
+    this.name = "SexpDomainError";
+    this.code = error.code;
+    this.data = error.data;
+    this.state = state;
+  }
+}
+
+const defaultDependencies: SexpExtensionDependencies = {
+  invokeBabashka,
+  readFile: readFileBytes,
+};
+
+const observationFailureCodes = new Set(["ambiguous", "changed", "deleted", "unknown"]);
+
 function unwired(toolName: string, _documents: DocumentRegistry): never {
   throw new Error(`${toolName} execution is not wired yet`);
 }
 
-export default function (pi: ExtensionAPI): void {
+export function createSexpExtension(
+  pi: ExtensionAPI,
+  dependencyOverrides: Partial<SexpExtensionDependencies> = {},
+): void {
+  const dependencies = { ...defaultDependencies, ...dependencyOverrides };
   const documents = createDocumentRegistry();
+
   pi.registerTool({
     name: "sexp_read",
     label: "S-expression Read",
     description: readDescription,
     parameters: sexpReadSchema,
-    async execute() {
-      return unwired("sexp_read", documents);
+    async execute(_toolCallId, parameters, signal, _onUpdate, context) {
+      const record = "path" in parameters
+        ? await documents.openPath(parameters.path, context.cwd)
+        : documents.getDocument(parameters.document);
+
+      return record.lock.run(async () => {
+        const bytes = await dependencies.readFile(record.canonicalPath);
+        const source = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+        const payload: Record<string, unknown> = {
+          "canonical-path": record.canonicalPath,
+          depth: parameters.depth ?? ("target" in parameters ? 2 : 0),
+          "document-id": record.documentId,
+          "include-atoms?": parameters.include_atoms ?? false,
+          source,
+        };
+        if (record.state !== undefined) payload.state = record.state;
+        if ("target" in parameters) payload.target = parameters.target;
+
+        const envelope = await dependencies.invokeBabashka(
+          pi,
+          { operation: "read", protocol_version: 1, request: payload },
+          signal,
+        );
+        if (!envelope.ok) {
+          if (observationFailureCodes.has(envelope.error.code)) {
+            if (!isRecord(envelope.state)) invalidProtocol("observation state must be an object");
+            record.state = envelope.state;
+          }
+          throw new SexpDomainError(envelope.error, envelope.state);
+        }
+        if (!isRecord(envelope.state)) invalidProtocol("read state must be an object");
+        if (typeof envelope.result.text !== "string") {
+          invalidProtocol("read result text must be a string");
+        }
+
+        record.state = envelope.state;
+        return {
+          content: [{ type: "text" as const, text: envelope.result.text }],
+          details: { document: record.documentId },
+        };
+      });
     },
   });
 
@@ -405,4 +475,8 @@ export default function (pi: ExtensionAPI): void {
       return unwired("sexp_edit", documents);
     },
   });
+}
+
+export default function (pi: ExtensionAPI): void {
+  createSexpExtension(pi);
 }

@@ -109,12 +109,17 @@
   - Validation: full Clojure suite 182 tests / 508 assertions; Bun 18 tests; real runtime import, whitespace, and newline checks pass.
   - Review: Pi Link review against `23862c4` found one Important failure-envelope test gap and one Minor killed-process realism gap; both were closed, and follow-up review found no remaining findings.
 - [x] Task 21: Canonicalize paths and manage process-local documents
-  - Commit: `documents: canonicalize paths and manage records` (this task's commit)
+  - Commit: `2a4b1c4 documents: canonicalize paths and manage records`
   - Notes: Added one-leading-@ normalization, dual requested/canonical extension gates, realpath file canonicalization, symlink record reuse, compact base-36 IDs, isolated record state, and per-record FIFO locks.
   - TDD: RED was 5 behavior failures / 0 errors; GREEN is 23 Bun tests / 34 assertions after canonical-extension and D9→Da review regressions.
   - Validation: full Clojure suite 182 tests / 508 assertions; Bun 23 tests; whitespace and newline checks pass.
   - Review: Pi Link review against `fad1b65` found one Important canonical symlink extension bypass and one Minor base-36 proof gap; both were fixed tests-first, and follow-up review found no remaining findings.
-- [ ] Task 22: Wire `sexp_read` through the registry and Babashka
+- [x] Task 22: Wire `sexp_read` through the registry and Babashka
+  - Commit: `read: wire sexp_read through babashka` (this task's commit)
+  - Notes: Added byte-safe latest-source reads, strict read protocol requests, path/open/refresh/target dispatch, lock-scoped execution, conditional defaults, observation-state commits, and annotated public results.
+  - TDD: RED was 5 behavior failures / 0 errors; GREEN is 30 Bun tests / 48 assertions after target-retirement, fatal-UTF-8, and root-protocol review regressions.
+  - Validation: full Clojure suite 182 tests / 508 assertions; Bun 30 tests; real Babashka annotated-read probe, whitespace, and newline checks pass.
+  - Review: Pi Link review against `2a4b1c4` found one Critical target-state resurrection path, one Important lossy UTF-8 decode, and one Minor protocol assertion gap; all were fixed tests-first, and follow-up review found no remaining findings.
 - [ ] Task 23: Add queued atomic `sexp_edit` file replacement
 - [ ] Task 24: Format bounded results and structured errors
 - [ ] Task 25: Harden cancellation, timeout, concurrency, and write failures
