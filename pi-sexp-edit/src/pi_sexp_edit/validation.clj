@@ -64,8 +64,9 @@
       (throw (invalid-form state
                            :new-form-forbidden
                            {:edit-index edit-index})))
-    (cond-> {:operation normalized
-             :target    target}
+    (cond-> {:edit-index edit-index
+             :operation  normalized
+             :target     target}
       (contains? form-operations normalized)
       (assoc :new-form new_form))))
 
@@ -96,6 +97,75 @@
                          :state  state
                          :target target})))
       (assoc edit :target-entry entry))))
+
+(def ^:private destructive-operations
+  #{:delete :replace})
+
+(def ^:private insertion-operations
+  #{:insert-after :insert-before})
+
+(defn- ordered-targets [edits]
+  (->> edits
+       (map :target)
+       distinct
+       (sort-by handles/parse-handle)
+       vec))
+
+(defn- batch-conflict [state reason edits]
+  (ex-info "Edit operations conflict within one batch"
+           {:code    :batch-conflict
+            :reason  reason
+            :state   state
+            :targets (ordered-targets edits)}))
+
+(defn- reject-same-target-conflicts! [state resolved-edits]
+  (doseq [[_path edits] (->> (group-by (comp :path :target-entry)
+                                       resolved-edits)
+                             (sort-by (comp :edit-index first val)))]
+    (let [destructive (filter #(contains? destructive-operations
+                                          (:operation %))
+                              edits)
+          insertions  (filter #(contains? insertion-operations
+                                          (:operation %))
+                              edits)]
+      (cond
+        (and (seq destructive) (seq insertions))
+        (throw (batch-conflict state :incompatible-boundary edits))
+
+        (> (count destructive) 1)
+        (throw (batch-conflict state :incompatible-same-target edits)))))
+  resolved-edits)
+
+(defn- strict-path-prefix? [ancestor descendant]
+  (and (< (count ancestor) (count descendant))
+       (= ancestor (subvec descendant 0 (count ancestor)))))
+
+(defn- reject-ancestor-conflicts! [state resolved-edits]
+  (let [ordered (vec (sort-by :edit-index resolved-edits))]
+    (doseq [left-index (range (count ordered))
+            right-index (range (inc left-index) (count ordered))]
+      (let [left  (nth ordered left-index)
+            right (nth ordered right-index)
+            left-path  (get-in left [:target-entry :path])
+            right-path (get-in right [:target-entry :path])]
+        (when (or (strict-path-prefix? left-path right-path)
+                  (strict-path-prefix? right-path left-path))
+          (throw (batch-conflict state
+                                 :ancestor-descendant
+                                 [left right]))))))
+  resolved-edits)
+
+(defn- validate-batch-conflicts! [state resolved-edits]
+  (->> resolved-edits
+       (reject-same-target-conflicts! state)
+       (reject-ancestor-conflicts! state)))
+
+(defn- target-plan [validated-edits]
+  (into {}
+        (map (fn [[path edits]]
+               [path {:edits        (vec (sort-by :edit-index edits))
+                      :target-entry (:target-entry (first edits))}]))
+        (group-by (comp :path :target-entry) validated-edits)))
 
 (defn- parsed-forms [state edit-index source]
   (let [{:keys [document] :as parsed}
@@ -169,14 +239,16 @@
                                vec)
         resolved-edits    (mapv #(resolve-target observed-state document %)
                                 operations)
+        planned-edits     (validate-batch-conflicts! observed-state
+                                                     resolved-edits)
         validated-edits   (mapv #(validate-supplied-forms
                                   observed-state
-                                  %1
-                                  %2)
-                                (range)
-                                resolved-edits)]
+                                  (:edit-index %)
+                                  %)
+                                planned-edits)]
     {:document                     document
      :edits                        validated-edits
      :external-changes-reconciled? external-changes?
      :repairs                      (into [] (keep :repair) validated-edits)
+     :target-plan                  (target-plan validated-edits)
      :state                        observed-state}))

@@ -120,7 +120,7 @@
                         [:after :before :code :reason])))))
 
 (deftest validation-reports-every-successful-repair
-  (let [source  "(target)"
+  (let [source  "(first-target)\n(second-target)"
         state   (opened-state source)
         result  (validation-result
                  (edit-request
@@ -131,7 +131,7 @@
                     :target "§1"}
                    {:new_form "[second)"
                     :operation "insert_after"
-                    :target "§1"}]))]
+                    :target "§2"}]))]
     (is (= {:form-sources [["(first)"] ["[second]"]]
             :new-forms ["(first)" "[second]"]
             :repairs [{:after "(first)"
@@ -141,13 +141,13 @@
                       {:after "[second]"
                        :before "[second)"
                        :edit-index 1
-                       :target "§1"}]}
+                       :target "§2"}]}
            {:form-sources (mapv #(mapv :source (:forms %)) (:edits result))
             :new-forms (mapv :new-form (:edits result))
             :repairs (:repairs result)}))))
 
 (deftest one-failed-repair-rejects-the-whole-supplied-form-batch
-  (let [source "(target)"
+  (let [source "(first-target)\n(second-target)"
         state  (opened-state source)
         calls  (atom [])]
     (with-redefs [parmezan/parmezan
@@ -165,7 +165,7 @@
                       :target "§1"}
                      {:new_form "(second"
                       :operation "insert_after"
-                      :target "§1"}]))]
+                      :target "§2"}]))]
         (is (= {:after "{:odd}"
                 :before "(second"
                 :calls ["(first" "(second"]
