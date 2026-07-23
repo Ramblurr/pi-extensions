@@ -1,5 +1,6 @@
 (ns pi-sexp-edit.parse
   (:require
+   [pi-sexp-edit.hashes :as hashes]
    [rewrite-clj.node :as node]
    [rewrite-clj.parser :as parser]))
 
@@ -317,39 +318,46 @@
                               exception)))))]
     (validate-structure! source root)))
 
-(defn parse-source [source]
-  (let [root             (parsed-root source)
-        starts           (line-start-offsets source)
-        nodes            (indexed-subtree source
-                                          starts
-                                          root
-                                          []
-                                          []
-                                          nil
-                                          :document
-                                          nil
-                                          false)
-        by-path          (into {}
-                               (keep (fn [entry]
-                                       (when (some? (:path entry))
-                                         [(:path entry) entry])))
+(defn parse-source
+  ([source]
+   (parse-source source {}))
+  ([source {:keys [document-id]}]
+   (let [root             (parsed-root source)
+         starts           (line-start-offsets source)
+         nodes            (indexed-subtree source
+                                           starts
+                                           root
+                                           []
+                                           []
+                                           nil
+                                           :document
+                                           nil
+                                           false)
+         by-path          (into {}
+                                (keep (fn [entry]
+                                        (when (some? (:path entry))
+                                          [(:path entry) entry])))
+                                nodes)
+         children-by-path (reduce
+                           (fn [children entry]
+                             (if (:structural? entry)
+                               (update children
+                                       (:parent-path entry)
+                                       (fnil conj [])
+                                       (:path entry))
+                               children))
+                           {}
+                           nodes)]
+     (hashes/enrich-document
+      document-id
+      {:by-concrete-path (into {}
+                               (map (juxt :concrete-path identity))
                                nodes)
-        children-by-path (reduce
-                          (fn [children entry]
-                            (if (:structural? entry)
-                              (update children
-                                      (:parent-path entry)
-                                      (fnil conj [])
-                                      (:path entry))
-                              children))
-                          {}
-                          nodes)]
-    {:by-concrete-path (into {} (map (juxt :concrete-path identity)) nodes)
-     :by-path          by-path
-     :children-by-path children-by-path
-     :nodes            nodes
-     :root             root
-     :source           source}))
+       :by-path          by-path
+       :children-by-path children-by-path
+       :nodes            nodes
+       :root             root
+       :source           source}))))
 
 (defn node-at-path [document path]
   (get (:by-path document) path))
