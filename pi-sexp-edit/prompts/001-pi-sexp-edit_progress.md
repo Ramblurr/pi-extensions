@@ -79,12 +79,17 @@
   - Validation: full Clojure suite 155 tests / 481 assertions; Bun 3 tests; cljfmt, clj-kondo, whitespace, and newline checks pass.
   - Review: Pi Link review against `9f0f953` found one Important same-boundary combination/indentation bug; combine-then-indent fixed it, and follow-up review found no remaining Critical or Important issues.
 - [x] Task 16: Rebuild post-edit handles and compact changed excerpts
-  - Commit: `edit: rebuild handles and continuation excerpts` (this task's commit)
+  - Commit: `b173461 edit: rebuild handles and continuation excerpts`
   - Notes: Added candidate-baseline lifecycle rebuilding, explicit replace/delete retirement, operation-aware duplicate path preservation, visible-only handle allocation, compact affected-form excerpts, and advertised/hidden outcome reporting.
   - TDD: Initial RED was 7 behavior failures / 0 errors; GREEN is 50 tests / 50 assertions after the duplicate-run review regression.
   - Validation: full Clojure suite 164 tests / 490 assertions; Bun 3 tests; cljfmt, clj-kondo, whitespace, and newline checks pass.
   - Review: Pi Link review against `a1ddec1` found one Important controlled-duplicate preservation gap; deterministic mutation path transforms fixed insert/delete/replace cases, and follow-up review found no remaining findings.
-- [ ] Task 17: Generate the unified diff for only the extension mutation
+- [x] Task 17: Generate the unified diff for only the extension mutation
+  - Commit: `diff: render extension-only unified diffs` (this task's commit)
+  - Notes: Added an in-process Myers line diff, deterministic three-context unified hunks, canonical headers, zero-count ranges, exact CR/LF payload preservation, missing-final-newline markers, and latest-source edit integration.
+  - TDD: Initial RED was 6 behavior failures / 0 errors; GREEN is 7 tests / 7 assertions after EOL golden and round-trip review coverage.
+  - Validation: full Clojure suite 171 tests / 497 assertions; Bun 3 tests; cljfmt, clj-kondo, whitespace, and newline checks pass.
+  - Review: Pi Link review against `b173461` found one Important discarded-CR/applicability defect; LF-only splitting with retained CR payloads fixed CRLF, EOL-only, mixed, and bare-CR cases, and follow-up review found no remaining findings.
 - [ ] Task 18: Add the versioned Babashka JSON entry point
 - [ ] Task 19: Define and register the strict TypeScript tool schemas
 - [ ] Task 20: Add secure, cancellable Babashka process invocation

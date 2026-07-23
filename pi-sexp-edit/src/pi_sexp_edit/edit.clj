@@ -1,6 +1,7 @@
 (ns pi-sexp-edit.edit
   (:require
    [clojure.string :as str]
+   [pi-sexp-edit.diff :as diff]
    [pi-sexp-edit.handles :as handles]
    [pi-sexp-edit.parse :as parse]
    [pi-sexp-edit.render :as render]
@@ -400,11 +401,16 @@
                           (excerpt-entries candidate
                                            (:changed-ranges mutation)))
         state            (:state rendered)
-        retirement       (retirement-report (:state request) state)]
+        retirement       (retirement-report (:state request) state)
+        unified-diff     (diff/unified-diff
+                          (get-in validated [:document :source])
+                          candidate-source
+                          (get-in validated [:state :canonical-path]))]
     {:applied-edits                (count (:edits validated))
      :candidate-document           candidate
      :candidate-source             candidate-source
      :created-handles              (:created-handles rendered)
+     :diff                         unified-diff
      :excerpt-handles              (:shown-handles rendered)
      :excerpts                     (:text rendered)
      :external-changes-reconciled? (:external-changes-reconciled? validated)
