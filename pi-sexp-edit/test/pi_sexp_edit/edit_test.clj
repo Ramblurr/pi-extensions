@@ -1,5 +1,7 @@
 (ns pi-sexp-edit.edit-test
   (:require
+   [clojure.java.io :as io]
+   [clojure.string :as str]
    [clojure.test :refer [deftest is]]
    [pi-sexp-edit.edit :as edit]
    [pi-sexp-edit.handles :as handles]
@@ -825,3 +827,152 @@
             :forward (get-in forward [:value :result :candidate-source])
             :reverse (get-in reverse-order
                              [:value :result :candidate-source])}))))
+
+(defn- syntax-fixture-directory []
+  (-> #'syntax-fixture-directory
+      meta
+      :file
+      io/file
+      .getCanonicalFile
+      .getParentFile
+      .getParentFile
+      (io/file "fixtures" "syntax")))
+
+(def syntax-fixture-names
+  ["sample.clj"
+   "sample.cljs"
+   "reader-syntax.cljc"
+   "sample.bb"
+   "sample.edn"
+   "sample.cljd"])
+
+(deftest multiline-replacement-starts-at-target-and-shifts-continuations
+  (let [source "(defn calculate []\n    (old))\n"
+        {:keys [result]}
+        (mutation-case source
+                       "(old)"
+                       {:new_form (str "(let [fee (lookup x)]\n"
+                                       "  (+ x fee))")
+                        :operation "replace"})]
+    (is (= (str "(defn calculate []\n"
+                "    (let [fee (lookup x)]\n"
+                "      (+ x fee)))\n")
+           (:candidate-source result)))))
+
+(deftest multiline-indentation-preserves-relative-indents-blank-lines-and-siblings
+  (let [source (str "(do\n"
+                    " (left)\n"
+                    "    target\n"
+                    "\t(right))")
+        {:keys [result]}
+        (mutation-case source
+                       "target"
+                       {:new_form (str "(let [x 1]\n"
+                                       "\n"
+                                       "  (when x\n"
+                                       "    x))")
+                        :operation "replace"})]
+    (is (= (str "(do\n"
+                " (left)\n"
+                "    (let [x 1]\n"
+                "\n"
+                "      (when x\n"
+                "        x))\n"
+                "\t(right))")
+           (:candidate-source result)))))
+
+(deftest multiline-insertion-keeps-the-original-target-at-its-indentation
+  (let [source (str "(do\n"
+                    "    (target)\n"
+                    "    (after))")
+        {:keys [result]}
+        (mutation-case source
+                       "(target)"
+                       {:new_form (str "(when ready\n"
+                                       "  (run))")
+                        :operation "insert_before"})]
+    (is (= (str "(do\n"
+                "    (when ready\n"
+                "      (run))\n"
+                "    (target)\n"
+                "    (after))")
+           (:candidate-source result)))))
+
+(deftest reader-syntax-corpus-survives-an-unrelated-edit-byte-for-byte
+  (let [fixture (io/file (syntax-fixture-directory)
+                         "reader-syntax.cljc")
+        source  (slurp fixture)
+        expected (str/replace source "(target :old)" "(target :new)")
+        {:keys [result]}
+        (mutation-case source
+                       "(target :old)"
+                       {:new_form "(target :new)"
+                        :operation "replace"})]
+    (is (= expected (:candidate-source result)))))
+
+(deftest local-edits-work-across-all-supported-clojure-file-extensions
+  (let [results
+        (mapv (fn [fixture-name]
+                (let [source (slurp (io/file (syntax-fixture-directory)
+                                             fixture-name))
+                      expected (str/replace source
+                                            "(target :old)"
+                                            "(target :new)")
+                      outcome (mutation-case
+                               source
+                               "(target :old)"
+                               {:new_form "(target :new)"
+                                :operation "replace"})]
+                  {:candidate-matches? (= expected
+                                          (get-in outcome
+                                                  [:result
+                                                   :candidate-source]))
+                   :fixture fixture-name}))
+              syntax-fixture-names)]
+    (is (= (mapv (fn [fixture-name]
+                   {:candidate-matches? true
+                    :fixture fixture-name})
+                 syntax-fixture-names)
+           results))))
+
+(deftest indentation-still-rejects-an-illegal-complete-candidate
+  (let [{:keys [error state]}
+        (mutation-error "{:a     target}"
+                        "target"
+                        {:new_form "one\n  two"
+                         :operation "replace"})]
+    (is (= {:candidate-source? false
+            :candidate-state? false
+            :code :invalid-candidate
+            :state-unchanged? true}
+           {:candidate-source? (contains? error :candidate-source)
+            :candidate-state? (contains? error :candidate-state)
+            :code (:code error)
+            :state-unchanged? (= state (:state error))}))))
+
+(deftest shared-boundary-insertions-indent-combined-crlf-forms-in-request-order
+  (let [source "(do\r\n    target\r\n    tail)"
+        insertions [{:new_form "a ; trailing"
+                     :operation "insert_before"
+                     :target-index 0}
+                    {:new_form "b\r\n  c"
+                     :operation "insert_before"
+                     :target-index 0}]
+        before (batch-outcome source ["target"] insertions)
+        after  (batch-outcome
+                source
+                ["target"]
+                (mapv #(assoc % :operation "insert_after") insertions))]
+    (is (= {:after (str "(do\r\n"
+                        "    target a ; trailing\r\n"
+                        "    b\r\n"
+                        "      c\r\n"
+                        "    tail)")
+            :before (str "(do\r\n"
+                         "    a ; trailing\r\n"
+                         "    b\r\n"
+                         "      c\r\n"
+                         "    target\r\n"
+                         "    tail)")}
+           {:after (get-in after [:value :result :candidate-source])
+            :before (get-in before [:value :result :candidate-source])}))))

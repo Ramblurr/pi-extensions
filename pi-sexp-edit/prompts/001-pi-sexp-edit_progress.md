@@ -66,13 +66,18 @@
   - Validation: full Clojure suite 138 tests / 464 assertions; Bun 3 tests; cljfmt, clj-kondo, whitespace, and newline checks pass.
   - Review: Pi Link review against `efd4760` found and verified fixes for CRLF/node-serialization loss, missing zipper authority, trailing-comment boundary capture, and structural mismatch classification; final review found no Critical or Important issues.
 - [x] Task 14: Enforce transactional batch semantics and conflicts
-  - Commit: `edit: enforce transactional batch conflicts` (this task's commit)
+  - Commit: `9f0f953 edit: enforce transactional batch conflicts`
   - Notes: Added path-keyed pre-edit plans, overlap/boundary conflict detection, descending zipper batches, sorted exact-span patches, and one final candidate validation.
   - TDD: RED was 8 behavior failures / 0 errors; GREEN is 34 tests / 34 assertions after review regression coverage.
   - Validation: full Clojure suite 148 tests / 474 assertions; Bun 3 tests; cljfmt, clj-kondo, whitespace, and newline checks pass.
   - Review: Pi Link review against `5ae1ba0` found one Important touching-patch lexical-boundary bug; safe-join regressions fixed it, and follow-up review found no remaining findings.
   - Contract migrations: Task 11/12 form and repair fixtures now use independent targets because Task 14 rejects insertion relative to replaced boundaries.
-- [ ] Task 15: Add local indentation and the reader-syntax preservation corpus
+- [x] Task 15: Add local indentation and the reader-syntax preservation corpus
+  - Commit: `edit: preserve local indentation and reader syntax` (this task's commit)
+  - Notes: Added parser-indexed indentation, combined-form continuation shifting, multiline insertion alignment, and exact cross-extension reader-syntax fixtures.
+  - TDD: RED was 3 behavior failures / 0 errors; GREEN is 41 tests / 41 assertions after shared-boundary CRLF regression coverage.
+  - Validation: full Clojure suite 155 tests / 481 assertions; Bun 3 tests; cljfmt, clj-kondo, whitespace, and newline checks pass.
+  - Review: Pi Link review against `9f0f953` found one Important same-boundary combination/indentation bug; combine-then-indent fixed it, and follow-up review found no remaining Critical or Important issues.
 - [ ] Task 16: Rebuild post-edit handles and compact changed excerpts
 - [ ] Task 17: Generate the unified diff for only the extension mutation
 - [ ] Task 18: Add the versioned Babashka JSON entry point

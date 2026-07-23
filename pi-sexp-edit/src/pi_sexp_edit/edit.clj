@@ -1,5 +1,6 @@
 (ns pi-sexp-edit.edit
   (:require
+   [clojure.string :as str]
    [pi-sexp-edit.parse :as parse]
    [pi-sexp-edit.validation :as validation]
    [rewrite-clj.node :as node]
@@ -36,30 +37,67 @@
     "\n"
     ""))
 
-(defn- combined-supplied [edits]
+(defn- source-line-segments [source]
+  (->> (re-seq #"[^\r\n]*(?:\r\n|\r|\n|$)" source)
+       (remove empty?)))
+
+(defn- indent-continuations [source indentation]
+  (let [[first-line & continuation-lines] (source-line-segments source)
+        prefix (apply str (repeat indentation " "))]
+    (apply str
+           first-line
+           (map #(if (str/blank? %) % (str prefix %))
+                continuation-lines))))
+
+(defn- first-line-break [source]
+  (re-find #"\r\n|\r|\n" source))
+
+(defn- combined-supplied [edits indentation]
   (when (seq edits)
-    (reduce
-     (fn [combined edit]
-       (let [separator (cond
-                         (nil? combined) ""
-                         (terminal-comment? (:root combined)
-                                            (:source combined)) "\n"
-                         :else " ")
-             source    (str (:source combined) separator (:new-form edit))]
-         {:root   (:root (parse/parse-source source))
-          :source source}))
-     nil
-     edits)))
+    (let [combined
+          (reduce
+           (fn [combined edit]
+             (let [next-source (:new-form edit)
+                   separator   (cond
+                                 (nil? combined)
+                                 ""
+
+                                 (contains? #{\newline \return}
+                                            (last (:source combined)))
+                                 ""
+
+                                 (terminal-comment? (:root combined)
+                                                    (:source combined))
+                                 (or (first-line-break (:source combined))
+                                     (first-line-break next-source)
+                                     "\n")
+
+                                 :else
+                                 " ")
+                   source      (str (:source combined)
+                                    separator
+                                    next-source)]
+               {:root   (:root (parse/parse-source source))
+                :source source}))
+           nil
+           edits)
+          source (indent-continuations (:source combined) indentation)]
+      {:root   (:root (parse/parse-source source))
+       :source source})))
 
 (defn- prepared-group [[path {:keys [edits target-entry]}]]
-  (let [destructive (first (filter #(contains? #{:delete :replace}
+  (let [indentation  (or (:indentation target-entry) 0)
+        destructive (first (filter #(contains? #{:delete :replace}
                                                (:operation %))
                                    edits))]
     {:after        (combined-supplied
-                    (filter #(= :insert-after (:operation %)) edits))
+                    (filter #(= :insert-after (:operation %)) edits)
+                    indentation)
      :before       (combined-supplied
-                    (filter #(= :insert-before (:operation %)) edits))
+                    (filter #(= :insert-before (:operation %)) edits)
+                    indentation)
      :destructive destructive
+     :indentation  indentation
      :path         path
      :target-entry target-entry}))
 
@@ -94,7 +132,9 @@
         (case (:operation destructive)
           :delete (-> target-location z/remove* z/root)
           :replace (-> target-location
-                       (z/replace* (:root (combined-supplied [destructive])))
+                       (z/replace* (:root (combined-supplied
+                                           [destructive]
+                                           (:indentation group))))
                        z/splice
                        z/root)))
       (cond-> root
@@ -142,12 +182,25 @@
                          :reason :invalid-target-span})))
       [start end])))
 
-(defn- before-insertion [supplied]
+(defn- before-insertion [supplied indentation]
   (when supplied
-    (str (:source supplied)
-         (if (terminal-comment? (:root supplied) (:source supplied))
-           "\n"
-           " "))))
+    (let [source     (:source supplied)
+          line-break (re-find #"\r\n|\r|\n" source)
+          prefix     (apply str (repeat indentation " "))
+          last-char  (last source)]
+      (str source
+           (cond
+             (terminal-comment? (:root supplied) source)
+             (str "\n" prefix)
+
+             (contains? #{\newline \return} last-char)
+             prefix
+
+             line-break
+             (str line-break prefix)
+
+             :else
+             " ")))))
 
 (defn- after-insertion [supplied following-source]
   (when supplied
@@ -156,17 +209,17 @@
          (comment-boundary supplied following-source))))
 
 (defn- group-replacement [source end group]
-  (let [{:keys [after before destructive target-entry]} group
+  (let [{:keys [after before destructive indentation target-entry]} group
         following-source (subs source end)
         target-source    (:source target-entry)]
     (if destructive
       (case (:operation destructive)
         :delete ""
         :replace
-        (let [supplied (combined-supplied [destructive])]
+        (let [supplied (combined-supplied [destructive] indentation)]
           (str (:source supplied)
                (comment-boundary supplied following-source))))
-      (str (before-insertion before)
+      (str (before-insertion before indentation)
            target-source
            (after-insertion after following-source)))))
 

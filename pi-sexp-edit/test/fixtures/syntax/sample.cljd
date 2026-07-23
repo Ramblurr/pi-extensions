@@ -1,0 +1,8 @@
+(defn target [& _args])
+(def alpha :alpha)
+(def beta :beta)
+(def state (atom nil))
+
+(def dart-data {:items [alpha beta]})
+(target :old)
+(def result @state)

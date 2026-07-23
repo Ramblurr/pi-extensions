@@ -204,6 +204,7 @@
                         :atom?           (some? kind)
                         :concrete-path   concrete-path
                         :node            node
+                        :indentation     (some-> (:col position) dec)
                         :parent-path     parent-path
                         :path            path
                         :role            role
