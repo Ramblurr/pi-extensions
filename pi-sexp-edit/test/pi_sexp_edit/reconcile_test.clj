@@ -22,6 +22,157 @@
   (some->> (get-in result [:pairs (:path old-entry) :current-path])
            (parse/node-at-path current-document)))
 
+(defn- sequence-context [old-values current-values]
+  (let [old            (parsed (pr-str (vec old-values)))
+        current        (parsed (pr-str (vec current-values)))
+        old-parent     (first (parse/structural-children old []))
+        current-parent (first (parse/structural-children current []))]
+    {:current          current
+     :current-children (parse/structural-children current
+                                                  (:path current-parent))
+     :old              old
+     :old-children     (parse/structural-children old (:path old-parent))}))
+
+(defn- direct-decisions [{:keys [current old-children]} result]
+  (mapv
+   (fn [old-entry]
+     (let [pair   (get-in result [:pairs (:path old-entry)])
+           status (get-in result [:statuses (:path old-entry)])]
+       (when (or pair status)
+         (cond-> {:status status}
+           pair
+           (assoc :current-index
+                  (:structural-index
+                   (parse/node-at-path current (:current-path pair)))
+                  :evidence
+                  (:evidence pair))))))
+   old-children))
+
+(defn- optimal-alignments [old-values current-values]
+  (letfn [(alignments [old-start current-start]
+            (cons
+             []
+             (for [old-index     (range old-start (count old-values))
+                   current-index (range current-start (count current-values))
+                   :when         (= (nth old-values old-index)
+                                    (nth current-values current-index))
+                   suffix        (alignments (inc old-index)
+                                             (inc current-index))]
+               (into [[old-index current-index]] suffix))))]
+    (let [candidates (alignments 0 0)
+          best-count (apply max (map count candidates))]
+      (filterv #(= best-count (count %)) candidates))))
+
+(defn- strong-oracle-decisions [old-values current-values]
+  (let [old-counts     (frequencies old-values)
+        current-counts (frequencies current-values)
+        same-edge
+        (into {}
+              (keep-indexed
+               (fn [index old-value]
+                 (when (and (< index (count current-values))
+                            (= old-value (nth current-values index))
+                            (= (get old-counts old-value)
+                               (get current-counts old-value)))
+                   [index {:current-index index
+                           :evidence      :equal-hash
+                           :status        :preserved}])))
+              old-values)
+        used-current   (into #{} (map (comp :current-index val)) same-edge)]
+    (reduce-kv
+     (fn [decisions old-index old-value]
+       (let [current-index
+             (first (keep-indexed (fn [index current-value]
+                                    (when (= old-value current-value)
+                                      index))
+                                  current-values))]
+         (if (and (not (contains? decisions old-index))
+                  (= 1 (get old-counts old-value))
+                  (= 1 (get current-counts old-value))
+                  (not (contains? used-current current-index)))
+           (assoc decisions
+                  old-index
+                  {:current-index current-index
+                   :evidence      :unique-hash
+                   :status        :preserved})
+           decisions)))
+     same-edge
+     old-values)))
+
+(defn- gap-oracle-decisions
+  [decisions old-values current-values [old-left current-left] [old-right current-right]]
+  (let [old-start     (inc old-left)
+        current-start (inc current-left)
+        old-segment   (subvec old-values old-start old-right)
+        current-segment (subvec current-values current-start current-right)
+        alignments    (optimal-alignments old-segment current-segment)]
+    (reduce
+     (fn [next-decisions old-index]
+       (let [destinations
+             (into #{}
+                   (map (fn [alignment]
+                          (some (fn [[aligned-old aligned-current]]
+                                  (when (= old-index aligned-old)
+                                    (+ current-start aligned-current)))
+                                alignment)))
+                   alignments)
+             destination (first destinations)
+             global-old-index (+ old-start old-index)]
+         (cond
+           (and (= 1 (count destinations)) destination)
+           (assoc next-decisions
+                  global-old-index
+                  {:current-index destination
+                   :evidence      :sequence-alignment
+                   :status        :preserved})
+
+           (> (count destinations) 1)
+           (assoc next-decisions global-old-index {:status :ambiguous})
+
+           :else
+           next-decisions)))
+     decisions
+     (range (count old-segment)))))
+
+(defn- oracle-decisions [old-values current-values]
+  (let [old-values      (vec old-values)
+        current-values  (vec current-values)
+        strong-decisions (strong-oracle-decisions old-values current-values)
+        anchors         (->> strong-decisions
+                             (map (fn [[old-index {:keys [current-index]}]]
+                                    [old-index current-index]))
+                             (sort-by first)
+                             vec)
+        monotonic?      (or (<= (count anchors) 1)
+                            (apply < (map second anchors)))
+        boundaries      (vec (concat [[-1 -1]]
+                                     anchors
+                                     [[(count old-values)
+                                       (count current-values)]]))
+        decisions       (if monotonic?
+                          (reduce (fn [next-decisions [left right]]
+                                    (gap-oracle-decisions next-decisions
+                                                          old-values
+                                                          current-values
+                                                          left
+                                                          right))
+                                  strong-decisions
+                                  (partition 2 1 boundaries))
+                          strong-decisions)]
+    (mapv decisions (range (count old-values)))))
+
+(defn- sequences-through-length [alphabet max-length]
+  (letfn [(of-length [length]
+            (if (zero? length)
+              [[]]
+              (for [prefix (of-length (dec length))
+                    value  alphabet]
+                (conj prefix value))))]
+    (vec (mapcat of-length (range (inc max-length))))))
+
+(def ^:private short-sequences
+  (sequences-through-length [:a :b] 3))
+
 (def ^:private declaration-cases
   [{:current "(ns sample.core (:require [new.dep]))"
     :name    "ns"
@@ -129,17 +280,26 @@
     (is (= :changed (get-in result [:statuses []])))))
 
 (deftest changed-parent-does-not-guess-through-a-duplicate-insertion
-  (let [old            (parsed "(do (foo) (foo))")
-        current        (parsed "(do (foo) (foo) (foo))")
-        result         (sut/reconcile old current)
-        old-duplicates (filter #(and (:structural? %)
-                                     (= "(foo)" (:source %)))
-                               (:nodes old))]
-    (is (= 2 (count old-duplicates)))
-    (is (every? #(nil? (get-in result [:pairs (:path %)]))
-                old-duplicates))
-    (is (every? #(nil? (get-in result [:statuses (:path %)]))
-                old-duplicates))))
+  (let [old             (parsed "(do (foo) (foo))")
+        current         (parsed "(do (foo) (foo) (foo))")
+        result          (sut/reconcile old current)
+        old-duplicates  (filter #(and (:structural? %)
+                                      (= "(foo)" (:source %)))
+                                (:nodes old))
+        old-descendants (filter #(and (:structural? %)
+                                      (= "foo" (:source %)))
+                                (:nodes old))]
+    (is (= {:descendant-statuses [:ambiguous :ambiguous]
+            :pair-count          0
+            :statuses            [:ambiguous :ambiguous]}
+           {:descendant-statuses (mapv #(get-in result
+                                                [:statuses (:path %)])
+                                       old-descendants)
+            :pair-count          (count (keep #(get-in result
+                                                       [:pairs (:path %)])
+                                              old-duplicates))
+            :statuses            (mapv #(get-in result [:statuses (:path %)])
+                                       old-duplicates)}))))
 
 (deftest unchanged-same-edge-duplicates-pair-when-multiplicity-is-stable
   (let [old            (parsed "(do (foo) (foo) (audit x))")
@@ -254,7 +414,7 @@
       (is (every? #(nil? (get-in result [:pairs (:path %)]))
                   old-entries)))))
 
-(deftest duplicate-hashes-do-not-become-reorder-anchors
+(deftest duplicate-hashes-do-not-become-unique-reorder-anchors
   (let [old            (parsed (str "(same)\n"
                                     "(same)\n"
                                     "(left :old)\n"
@@ -266,10 +426,22 @@
         result         (sut/reconcile old current)
         old-duplicates (filter #(and (:structural? %)
                                      (= "(same)" (:source %)))
-                               (:nodes old))]
-    (is (= 2 (count old-duplicates)))
-    (is (every? #(nil? (get-in result [:pairs (:path %)]))
-                old-duplicates))))
+                               (:nodes old))
+        pairs          (map #(get-in result [:pairs (:path %)])
+                            old-duplicates)]
+    (is (= {:count             2
+            :destinations      2
+            :evidence          #{:sequence-alignment}
+            :statuses          #{:preserved}
+            :unique-hash-pairs 0}
+           {:count             (count old-duplicates)
+            :destinations      (count (set (map :current-path pairs)))
+            :evidence          (set (map :evidence pairs))
+            :statuses          (set (map #(get-in result
+                                                  [:statuses (:path %)])
+                                         old-duplicates))
+            :unique-hash-pairs (count (filter #(= :unique-hash (:evidence %))
+                                              pairs))}))))
 
 (deftest duplicate-declaration-keys-do-not-anchor
   (let [old-sources    ["(defn repeated [] :old-a)"
@@ -351,3 +523,154 @@
             :paired-source (:source (parse/node-at-path current
                                                         (:current-path pair)))
             :status      (get-in result [:statuses (:path old-target)])}))))
+
+(deftest equal-parent-duplicate-runs-map-positionally
+  (let [context (sequence-context [:a :a] [:a :a])
+        result  (sut/reconcile (:old context) (:current context))]
+    (is (= [{:current-index 0
+             :evidence      :equal-hash
+             :status        :preserved}
+            {:current-index 1
+             :evidence      :equal-hash
+             :status        :preserved}]
+           (direct-decisions context result)))))
+
+(deftest indistinguishable-insertion-history-remains-ambiguous
+  (let [context (sequence-context [:left :a :a :right]
+                                  [:left :a :a :a :right])
+        result  (sut/reconcile (:old context) (:current context))]
+    (is (= [{:current-index 0
+             :evidence      :equal-hash
+             :status        :preserved}
+            {:status :ambiguous}
+            {:status :ambiguous}
+            {:current-index 4
+             :evidence      :unique-hash
+             :status        :preserved}]
+           (direct-decisions context result))
+        "before, between, and after insertions have identical snapshots")))
+
+(deftest surrounding-anchors-narrow-duplicate-alignment-segments
+  (let [context (sequence-context [:left :a :a :middle :a :right]
+                                  [:left :a :a :a :middle :a :right])
+        result  (sut/reconcile (:old context) (:current context))]
+    (is (= [{:current-index 0
+             :evidence      :equal-hash
+             :status        :preserved}
+            {:status :ambiguous}
+            {:status :ambiguous}
+            {:current-index 4
+             :evidence      :unique-hash
+             :status        :preserved}
+            {:current-index 5
+             :evidence      :sequence-alignment
+             :status        :preserved}
+            {:current-index 6
+             :evidence      :unique-hash
+             :status        :preserved}]
+           (direct-decisions context result)))))
+
+(deftest short-duplicate-sequences-match-the-exhaustive-alignment-oracle
+  (doseq [old-values     short-sequences
+          current-values short-sequences]
+    (let [context      (sequence-context old-values current-values)
+          result       (sut/reconcile (:old context) (:current context))
+          actual       (direct-decisions context result)
+          destinations (keep :current-index actual)]
+      (is (= {:decisions  (oracle-decisions old-values current-values)
+              :injective? true}
+             {:decisions  actual
+              :injective? (= (count destinations)
+                             (count (set destinations)))})
+          (str "old=" old-values " current=" current-values)))))
+
+(deftest deterministic-alignment-order-does-not-create-evidence
+  (let [context   (sequence-context [:a :a] [:a :a :a])
+        decisions (mapv (fn [_iteration]
+                          (direct-decisions
+                           context
+                           (sut/reconcile (:old context) (:current context))))
+                        (range 5))]
+    (is (= (vec (repeat 5 [{:status :ambiguous}
+                           {:status :ambiguous}]))
+           decisions))))
+
+(deftest compatible-fallback-does-not-cross-anchor-bounded-segments
+  (let [old      (parsed (str "[(a (target)) (a (target)) (b) "
+                              "(a (target)) (c) (b)]"))
+        current  (parsed (str "[(a (target)) (b) (c) "
+                              "(a (target)) (b) (b)]"))
+        result   (sut/reconcile old current)
+        old-parent (first (parse/structural-children old []))
+        old-container (nth (parse/structural-children old
+                                                      (:path old-parent))
+                           3)
+        old-target (first (filter #(= "(target)" (:source %))
+                                  (parse/structural-children
+                                   old
+                                   (:path old-container))))]
+    (is (= {:container {:pair nil
+                        :status nil}
+            :target    {:pair nil
+                        :status nil}}
+           {:container {:pair (get-in result
+                                      [:pairs (:path old-container)])
+                        :status (get-in result
+                                        [:statuses (:path old-container)])}
+            :target    {:pair (get-in result [:pairs (:path old-target)])
+                        :status (get-in result
+                                        [:statuses (:path old-target)])}}))))
+
+(deftest compatible-fallback-is-disabled-when-stronger-anchors-cross
+  (let [old         (parsed "[(left) (wrapper (target) :old) (right)]")
+        current     (parsed "[(right) (wrapper (target) :new) (left)]")
+        result      (sut/reconcile old current)
+        old-parent  (first (parse/structural-children old []))
+        old-wrapper (nth (parse/structural-children old (:path old-parent)) 1)
+        old-target  (first (filter #(= "(target)" (:source %))
+                                   (parse/structural-children
+                                    old
+                                    (:path old-wrapper))))]
+    (is (= {:wrapper {:pair nil
+                      :status nil}
+            :target  {:pair nil
+                      :status nil}}
+           {:wrapper {:pair (get-in result [:pairs (:path old-wrapper)])
+                      :status (get-in result
+                                      [:statuses (:path old-wrapper)])}
+            :target  {:pair (get-in result [:pairs (:path old-target)])
+                      :status (get-in result
+                                      [:statuses (:path old-target)])}}))))
+
+(deftest segment-fallback-runs-after-ambiguous-candidates-are-reserved
+  (let [old         (parsed "[(same) (same) (wrapper (target) :old)]")
+        current     (parsed (str "[(same) (same) "
+                                 "(replacement (target) :new) (same)]"))
+        result      (sut/reconcile old current)
+        old-parent  (first (parse/structural-children old []))
+        old-children (parse/structural-children old (:path old-parent))
+        duplicates  (subvec old-children 0 2)
+        old-wrapper (nth old-children 2)
+        old-target  (first (filter #(= "(target)" (:source %))
+                                   (parse/structural-children
+                                    old
+                                    (:path old-wrapper))))
+        wrapper-pair (get-in result [:pairs (:path old-wrapper)])]
+    (is (= {:duplicate-statuses [:ambiguous :ambiguous]
+            :target             {:evidence :equal-hash
+                                 :status   :preserved}
+            :wrapper            {:evidence :compatible-container
+                                 :status   :changed}}
+           {:duplicate-statuses (mapv #(get-in result [:statuses (:path %)])
+                                      duplicates)
+            :target             {:evidence (get-in result
+                                                   [:pairs
+                                                    (:path old-target)
+                                                    :evidence])
+                                 :status   (get-in result
+                                                   [:statuses
+                                                    (:path old-target)])}
+            :wrapper            {:evidence (:evidence wrapper-pair)
+                                 :status   (get-in result
+                                                   [:statuses
+                                                    (:path old-wrapper)])}}))))

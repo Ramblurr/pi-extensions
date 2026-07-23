@@ -181,6 +181,178 @@
      matching
      old-children)))
 
+(defn- lcs-lengths [old-values current-values]
+  (reduce
+   (fn [rows old-value]
+     (let [previous-row (peek rows)
+           next-row
+           (reduce-kv
+            (fn [row current-index current-value]
+              (conj row
+                    (if (= old-value current-value)
+                      (inc (nth previous-row current-index))
+                      (max (peek row)
+                           (nth previous-row (inc current-index))))))
+            [0]
+            current-values)]
+       (conj rows next-row)))
+   [(vec (repeat (inc (count current-values)) 0))]
+   old-values))
+
+(defn- alignment-destinations [old-children current-children]
+  (let [old-values      (mapv :concrete-hash old-children)
+        current-values  (mapv :concrete-hash current-children)
+        old-count       (count old-values)
+        current-count   (count current-values)
+        prefix-lengths  (lcs-lengths old-values current-values)
+        reverse-lengths (lcs-lengths (vec (reverse old-values))
+                                     (vec (reverse current-values)))
+        optimum         (get-in prefix-lengths [old-count current-count])]
+    (mapv
+     (fn [old-index]
+       (let [suffix-old-count (- old-count old-index 1)
+             destinations
+             (into #{}
+                   (keep
+                    (fn [current-index]
+                      (when (and (= (nth old-values old-index)
+                                    (nth current-values current-index))
+                                 (= optimum
+                                    (+ (get-in prefix-lengths
+                                               [old-index current-index])
+                                       1
+                                       (get-in reverse-lengths
+                                               [suffix-old-count
+                                                (- current-count
+                                                   current-index
+                                                   1)]))))
+                        current-index)))
+                   (range current-count))
+             unmatched?
+             (some (fn [current-split]
+                     (= optimum
+                        (+ (get-in prefix-lengths
+                                   [old-index current-split])
+                           (get-in reverse-lengths
+                                   [suffix-old-count
+                                    (- current-count current-split)]))))
+                   (range (inc current-count)))]
+         (cond-> destinations
+           unmatched? (conj nil))))
+     (range old-count))))
+
+(defn- mark-ambiguous-subtree [result old-document old-entry]
+  (reduce (fn [next-result old-child]
+            (mark-ambiguous-subtree next-result old-document old-child))
+          (assoc-in result [:statuses (:path old-entry)] :ambiguous)
+          (parse/structural-children old-document (:path old-entry))))
+
+(defn- pair-sequence-segment
+  [matching old-document current-document old-children current-children]
+  (reduce-kv
+   (fn [{:keys [matched-current matched-old result] :as next-matching}
+        old-index
+        destinations]
+     (let [old-child   (nth old-children old-index)
+           destination (first destinations)]
+       (cond
+         (and (= 1 (count destinations))
+              (some? destination))
+         (let [current-child (nth current-children destination)]
+           {:matched-current (conj matched-current (:path current-child))
+            :matched-old     (conj matched-old (:path old-child))
+            :result          (pair-equal-subtree result
+                                                 old-document
+                                                 current-document
+                                                 old-child
+                                                 current-child
+                                                 :sequence-alignment)})
+
+         (> (count destinations) 1)
+         (let [possible-current-paths
+               (into #{}
+                     (keep (fn [current-index]
+                             (when (some? current-index)
+                               (:path (nth current-children current-index)))))
+                     destinations)]
+           {:matched-current (into matched-current possible-current-paths)
+            :matched-old     (conj matched-old (:path old-child))
+            :result          (mark-ambiguous-subtree result
+                                                     old-document
+                                                     old-child)})
+
+         :else
+         next-matching)))
+   matching
+   (alignment-destinations old-children current-children)))
+
+(defn- pair-sequence-gap
+  [matching old-document current-document old-children current-children]
+  (let [{:keys [matched-current matched-old result] :as aligned}
+        (pair-sequence-segment matching
+                               old-document
+                               current-document
+                               old-children
+                               current-children)
+        unmatched-old     (remove #(contains? matched-old (:path %))
+                                  old-children)
+        unmatched-current (remove #(contains? matched-current (:path %))
+                                  current-children)]
+    (if (and (= 1 (count unmatched-old))
+             (= 1 (count unmatched-current))
+             (compatible-container? (first unmatched-old)
+                                    (first unmatched-current)))
+      (let [old-child     (first unmatched-old)
+            current-child (first unmatched-current)]
+        {:matched-current (conj matched-current (:path current-child))
+         :matched-old     (conj matched-old (:path old-child))
+         :result          (pair-changed-container result
+                                                  old-document
+                                                  current-document
+                                                  old-child
+                                                  current-child)})
+      aligned)))
+
+(defn- pair-order-preserving-children
+  [matching old-document current-document old-children current-children]
+  (let [current-index-by-path (into {}
+                                    (map-indexed (fn [index current-child]
+                                                   [(:path current-child) index]))
+                                    current-children)
+        anchors
+        (into []
+              (keep-indexed
+               (fn [old-index old-child]
+                 (when (contains? (:matched-old matching) (:path old-child))
+                   (let [current-path (get-in matching
+                                              [:result
+                                               :pairs
+                                               (:path old-child)
+                                               :current-path])]
+                     (when-some [current-index
+                                 (get current-index-by-path current-path)]
+                       [old-index current-index])))))
+              old-children)
+        monotonic? (or (<= (count anchors) 1)
+                       (apply < (map second anchors)))
+        boundaries (vec (concat [[-1 -1]]
+                                anchors
+                                [[(count old-children)
+                                  (count current-children)]]))]
+    (if monotonic?
+      (reduce
+       (fn [next-matching [[old-left current-left]
+                           [old-right current-right]]]
+         (pair-sequence-gap
+          next-matching
+          old-document
+          current-document
+          (subvec old-children (inc old-left) old-right)
+          (subvec current-children (inc current-left) current-right)))
+       matching
+       (partition 2 1 boundaries))
+      matching)))
+
 (defn- pair-changed-children
   [result old-document current-document old-entry current-entry]
   (let [old-children       (parse/structural-children old-document
@@ -203,21 +375,13 @@
                                           current-document
                                           old-children
                                           current-children)
-        {:keys [matched-current matched-old result]} declaration-matching
-        unmatched-old     (remove #(contains? matched-old (:path %))
-                                  old-children)
-        unmatched-current (remove #(contains? matched-current (:path %))
-                                  current-children)]
-    (if (and (= 1 (count unmatched-old))
-             (= 1 (count unmatched-current))
-             (compatible-container? (first unmatched-old)
-                                    (first unmatched-current)))
-      (pair-changed-container result
-                              old-document
-                              current-document
-                              (first unmatched-old)
-                              (first unmatched-current))
-      result)))
+        sequence-matching  (pair-order-preserving-children
+                            declaration-matching
+                            old-document
+                            current-document
+                            old-children
+                            current-children)]
+    (:result sequence-matching)))
 
 (defn- pair-changed-container
   ([result old-document current-document old-entry current-entry]
