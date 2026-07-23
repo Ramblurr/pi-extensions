@@ -1,6 +1,7 @@
 (ns pi-sexp-edit.edit-test
   (:require
    [clojure.test :refer [deftest is]]
+   [pi-sexp-edit.edit :as edit]
    [pi-sexp-edit.handles :as handles]
    [pi-sexp-edit.parse :as parse]
    [pi-sexp-edit.render :as render]
@@ -305,3 +306,230 @@
                                      "§1"
                                      :reason])
             :target (:target error)}))))
+
+(defn- state-with-target [source target-source]
+  (let [document (parse/parse-source source {:document-id document-id})
+        target   (first (filter #(and (:structural? %)
+                                      (= target-source (:source %)))
+                                (:nodes document)))
+        [allocated handle] (handles/allocate-handle
+                            (handles/initial-state document-id
+                                                   canonical-path
+                                                   source)
+                            target)]
+    {:handle handle
+     :state  (handles/advertise-handle allocated handle)}))
+
+(defn- mutation-case [source target-source operation]
+  (let [{:keys [handle state]} (state-with-target source target-source)
+        result (edit/edit-source
+                (edit-request source
+                              state
+                              [(assoc operation :target handle)]))]
+    {:handle handle
+     :result result
+     :state state}))
+
+(defn- mutation-error [source target-source operation]
+  (let [{:keys [handle state]} (state-with-target source target-source)]
+    {:error (try
+              (edit/edit-source
+               (edit-request source
+                             state
+                             [(assoc operation :target handle)]))
+              nil
+              (catch Exception exception
+                (ex-data exception)))
+     :handle handle
+     :state state}))
+
+(deftest replaces-one-structural-target-with-one-form
+  (let [source (str "(defn calculate []\n"
+                    "  (+ 1 2))\n")
+        {:keys [result]}
+        (mutation-case source
+                       "(+ 1 2)"
+                       {:new_form "(- 4 1)"
+                        :operation "replace"})]
+    (is (= (str "(defn calculate []\n"
+                "  (- 4 1))\n")
+           (:candidate-source result)))))
+
+(deftest replaces-one-target-with-multiple-context-valid-forms
+  (let [{:keys [result]}
+        (mutation-case "[prefix target suffix]"
+                       "target"
+                       {:new_form "first second"
+                        :operation "replace"})]
+    (is (= "[prefix first second suffix]"
+           (:candidate-source result)))))
+
+(deftest deletes-exactly-the-target-node
+  (let [{:keys [result]}
+        (mutation-case "(do keep target tail)"
+                       "target"
+                       {:operation "delete"})]
+    (is (= "(do keep  tail)" (:candidate-source result)))))
+
+(deftest inserts-one-or-more-forms-at-target-boundaries
+  (let [source "[left target right]"
+        before (mutation-case source
+                              "target"
+                              {:new_form "before-1 before-2"
+                               :operation "insert_before"})
+        after  (mutation-case source
+                              "target"
+                              {:new_form "after-1 after-2"
+                               :operation "insert_after"})]
+    (is (= {:after "[left target after-1 after-2 right]"
+            :before "[left before-1 before-2 target right]"}
+           {:after (get-in after [:result :candidate-source])
+            :before (get-in before [:result :candidate-source])}))))
+
+(deftest leading-comments-and-surrounding-trivia-remain-on-replace-and-delete
+  (let [source "; leading\n(target)\n(after)\n"
+        replaced (mutation-case source
+                                "(target)"
+                                {:new_form "(replacement)"
+                                 :operation "replace"})
+        deleted  (mutation-case source
+                                "(target)"
+                                {:operation "delete"})]
+    (is (= {:deleted "; leading\n\n(after)\n"
+            :replaced "; leading\n(replacement)\n(after)\n"}
+           {:deleted (get-in deleted [:result :candidate-source])
+            :replaced (get-in replaced [:result :candidate-source])}))))
+
+(deftest comments-inside-removed-collections-disappear-with-the-target
+  (let [source "(outer [a ; inside\n b] tail)"
+        replaced (mutation-case source
+                                "[a ; inside\n b]"
+                                {:new_form "replacement"
+                                 :operation "replace"})
+        deleted  (mutation-case source
+                                "[a ; inside\n b]"
+                                {:operation "delete"})]
+    (is (= {:deleted "(outer  tail)"
+            :replaced "(outer replacement tail)"}
+           {:deleted (get-in deleted [:result :candidate-source])
+            :replaced (get-in replaced [:result :candidate-source])}))))
+
+(deftest insertion-does-not-move-or-delete-existing-comments
+  (let [source (str "(do\n"
+                    "  (before)\n"
+                    "  ; boundary\n"
+                    "  (target)\n"
+                    "  (after))")
+        {:keys [result]}
+        (mutation-case source
+                       "(target)"
+                       {:new_form "(inserted)"
+                        :operation "insert_before"})]
+    (is (= (str "(do\n"
+                "  (before)\n"
+                "  ; boundary\n"
+                "  (inserted) (target)\n"
+                "  (after))")
+           (:candidate-source result)))))
+
+(deftest unrelated-prefixes-suffixes-comments-commas-and-whitespace-stay-exact
+  (let [source (str "; prefix\n"
+                    "{:a [one,  target]  ; side\n"
+                    " :b two}\n"
+                    "; suffix\n")
+        {:keys [result]}
+        (mutation-case source
+                       "target"
+                       {:new_form "replacement"
+                        :operation "replace"})]
+    (is (= (str "; prefix\n"
+                "{:a [one,  replacement]  ; side\n"
+                " :b two}\n"
+                "; suffix\n")
+           (:candidate-source result)))))
+
+(deftest invalid-surrounding-contexts-fail-without-candidate-state
+  (let [cases [{:operation {:new_form "one two"
+                            :operation "replace"}
+                :source "{:a target}"
+                :target-source "target"}
+               {:operation {:operation "delete"}
+                :source "[^:private target]"
+                :target-source "target"}
+               {:operation {:new_form "one two"
+                            :operation "replace"}
+                :source "[^:private target tail]"
+                :target-source "target"}]
+        results
+        (mapv (fn [{:keys [operation source target-source]}]
+                (let [{:keys [error handle state]}
+                      (mutation-error source target-source operation)]
+                  {:candidate-source? (contains? error :candidate-source)
+                   :candidate-state? (contains? error :candidate-state)
+                   :code (:code error)
+                   :observation-state-unchanged? (= state (:state error))
+                   :operation (:operation error)
+                   :target-matches? (= handle (:target error))}))
+              cases)]
+    (is (= [{:candidate-source? false
+             :candidate-state? false
+             :code :invalid-candidate
+             :observation-state-unchanged? true
+             :operation :replace
+             :target-matches? true}
+            {:candidate-source? false
+             :candidate-state? false
+             :code :invalid-candidate
+             :observation-state-unchanged? true
+             :operation :delete
+             :target-matches? true}
+            {:candidate-source? false
+             :candidate-state? false
+             :code :invalid-candidate
+             :observation-state-unchanged? true
+             :operation :replace
+             :target-matches? true}]
+           results))))
+
+(deftest mutations-preserve-crlf-mixed-endings-and-multiline-string-bytes
+  (let [cases [{:expected "(do\r\n  a,\r\n  replacement)\r\n"
+                :source "(do\r\n  a,\r\n  target)\r\n"}
+               {:expected "(first)\r\n[replacement]\n(last)\r"
+                :source "(first)\r\n[target]\n(last)\r"}
+               {:expected "(do \"line1\r\nline2\" replacement)\r\n"
+                :source "(do \"line1\r\nline2\" target)\r\n"}]]
+    (is (= (mapv :expected cases)
+           (mapv (fn [{:keys [source]}]
+                   (get-in (mutation-case
+                            source
+                            "target"
+                            {:new_form "replacement"
+                             :operation "replace"})
+                           [:result :candidate-source]))
+                 cases)))))
+
+(deftest trailing-supplied-comments-do-not-consume-preserved-forms
+  (let [inserted (mutation-case "target\n(after)\n"
+                                "target"
+                                {:new_form "inserted ; trailing"
+                                 :operation "insert_before"})
+        replaced (mutation-case "target (after)\n"
+                                "target"
+                                {:new_form "replacement ; trailing"
+                                 :operation "replace"})
+        inserted-source (get-in inserted [:result :candidate-source])
+        replaced-source (get-in replaced [:result :candidate-source])]
+    (is (= {:inserted-source "inserted ; trailing\ntarget\n(after)\n"
+            :inserted-forms ["inserted" "target" "(after)"]
+            :replaced-source "replacement ; trailing\n (after)\n"
+            :replaced-forms ["replacement" "(after)"]}
+           {:inserted-source inserted-source
+            :inserted-forms (mapv :source
+                                  (parse/structural-children
+                                   (parse/parse-source inserted-source)
+                                   []))
+            :replaced-source replaced-source
+            :replaced-forms (mapv :source
+                                  (parse/structural-children
+                                   (parse/parse-source replaced-source)
+                                   []))}))))

@@ -53,13 +53,18 @@
   - Validation: full Clojure suite 118 tests / 444 assertions; Bun 3 tests; cljfmt, clj-kondo, whitespace, and newline checks pass.
   - Review: Pi Link review against `2b9a9ad` found no Critical or Important issues; its one Minor cross-document fixture finding was fixed, and follow-up review approved the task.
 - [x] Task 12: Add reported Parmezan delimiter repair
-  - Commit: `repair: add reported delimiter repair` (this task's commit)
+  - Commit: `efd4760 repair: add reported delimiter repair`
   - Notes: Added Edamame-gated Parmezan repair, rewrite-clj reparse validation, exact repair reports, and whole-batch failure semantics.
   - TDD: RED was 8 behavior failures / 0 errors (with the existing malformed-source guard already passing); GREEN is 9 tests / 9 assertions.
   - Validation: focused repair 9/9, focused edit 13/13, full Clojure suite 127 tests / 453 assertions; Bun 3 tests; cljfmt, clj-kondo, whitespace, and newline checks pass.
   - Review: Pi Link review against `ad44cbf` found no Critical or Important issues; its one Minor tautological assertion finding was fixed, and follow-up review approved the task.
   - Contract migration: Removed the obsolete Task 11 expectation that a missing `)` stays invalid; Task 12 now proves the same syntax is repaired and reported.
-- [ ] Task 13: Implement each single structural edit operation
+- [x] Task 13: Implement each single structural edit operation
+  - Commit: `edit: add single structural operations` (this task's commit)
+  - Notes: Added exact-span replace/delete/insert operations, rewrite-clj zipper structural authority, complete candidate parsing, and represented invalid-context failures.
+  - TDD: RED was 9 behavior failures / 0 errors; GREEN is 24 tests / 24 assertions after review regressions.
+  - Validation: full Clojure suite 138 tests / 464 assertions; Bun 3 tests; cljfmt, clj-kondo, whitespace, and newline checks pass.
+  - Review: Pi Link review against `efd4760` found and verified fixes for CRLF/node-serialization loss, missing zipper authority, trailing-comment boundary capture, and structural mismatch classification; final review found no Critical or Important issues.
 - [ ] Task 14: Enforce transactional batch semantics and conflicts
 - [ ] Task 15: Add local indentation and the reader-syntax preservation corpus
 - [ ] Task 16: Rebuild post-edit handles and compact changed excerpts
