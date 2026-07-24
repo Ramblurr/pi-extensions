@@ -65,93 +65,14 @@ const MockType = {
   },
 };
 
-function mockTruncateHead(
-  content: string,
-  options: { maxBytes?: number; maxLines?: number } = {},
-) {
-  const maxBytes = options.maxBytes ?? 50 * 1024;
-  const maxLines = options.maxLines ?? 2000;
-  const totalBytes = Buffer.byteLength(content);
-  const lines = content.length === 0 ? [] : content.split("\n");
-  if (content.endsWith("\n")) lines.pop();
-  const totalLines = lines.length;
-  if (totalLines <= maxLines && totalBytes <= maxBytes) {
-    return {
-      content,
-      firstLineExceedsLimit: false,
-      lastLinePartial: false,
-      maxBytes,
-      maxLines,
-      outputBytes: totalBytes,
-      outputLines: totalLines,
-      totalBytes,
-      totalLines,
-      truncated: false,
-      truncatedBy: null,
-    };
-  }
-  if (Buffer.byteLength(lines[0] ?? "") > maxBytes) {
-    return {
-      content: "",
-      firstLineExceedsLimit: true,
-      lastLinePartial: false,
-      maxBytes,
-      maxLines,
-      outputBytes: 0,
-      outputLines: 0,
-      totalBytes,
-      totalLines,
-      truncated: true,
-      truncatedBy: "bytes",
-    };
-  }
-  const selected: string[] = [];
-  let countedBytes = 0;
-  let truncatedBy: "bytes" | "lines" = "lines";
-  for (let index = 0; index < lines.length && index < maxLines; index += 1) {
-    const bytes = Buffer.byteLength(lines[index] ?? "") + (index > 0 ? 1 : 0);
-    if (countedBytes + bytes > maxBytes) {
-      truncatedBy = "bytes";
-      break;
-    }
-    selected.push(lines[index] ?? "");
-    countedBytes += bytes;
-  }
-  if (selected.length >= maxLines && countedBytes <= maxBytes)
-    truncatedBy = "lines";
-  const result = selected.join("\n");
-  return {
-    content: result,
-    firstLineExceedsLimit: false,
-    lastLinePartial: false,
-    maxBytes,
-    maxLines,
-    outputBytes: Buffer.byteLength(result),
-    outputLines: selected.length,
-    totalBytes,
-    totalLines,
-    truncated: true,
-    truncatedBy,
-  };
-}
+const realCodingAgent = await import("@earendil-works/pi-coding-agent");
+const realCreateWriteToolDefinition = realCodingAgent.createWriteToolDefinition;
 
 mock.module("@earendil-works/pi-ai", () => ({
   StringEnum(values: readonly string[], options: MockSchema = {}) {
     return { type: "string", enum: [...values], ...options };
   },
   Type: MockType,
-}));
-
-mock.module("@earendil-works/pi-coding-agent", () => ({
-  DEFAULT_MAX_BYTES: 50 * 1024,
-  DEFAULT_MAX_LINES: 2000,
-  formatSize(bytes: number) {
-    return `${bytes}B`;
-  },
-  truncateHead: mockTruncateHead,
-  async withFileMutationQueue(_path: string, task: () => Promise<unknown>) {
-    return task();
-  },
 }));
 
 const extensionModule = await import("../index.ts");
@@ -2817,6 +2738,453 @@ describe("package", () => {
       rmSync(directory, { force: true, recursive: true });
       if (artifactPath)
         rmSync(dirname(artifactPath), { force: true, recursive: true });
+    }
+  });
+
+  test("pre-aborted edit skips Babashka and filesystem mutation", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-edit-"));
+    try {
+      const path = join(directory, "sample.clj");
+      writeFileSync(path, "(old)");
+      let invocations = 0;
+      let renames = 0;
+      const tools = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          invocations += 1;
+          return (request as Record<string, unknown>).operation === "read"
+            ? readSuccess({ open: true })
+            : editSuccess({ candidate: true });
+        },
+        async rename(source, destination) {
+          renames += 1;
+          return renameFile(source, destination);
+        },
+      });
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      await executeReadTool(read, { path }, directory);
+      const controller = new AbortController();
+      controller.abort();
+      const error = await caught(() =>
+        executeEditTool(
+          edit,
+          {
+            document: "D1",
+            edits: [{ new_form: "(new)", operation: "replace", target: "§1" }],
+          },
+          directory,
+          controller.signal,
+        ),
+      );
+      expect({
+        code: (error as Error & { code?: string })?.code,
+        file: readFileSync(path, "utf8"),
+        invocations,
+        renames,
+      }).toEqual({
+        code: "cancelled",
+        file: "(old)",
+        invocations: 1,
+        renames: 0,
+      });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("abort during Babashka terminates ordinary and repair-shaped edits", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-sexp-edit-"));
+    try {
+      const outcomes: Record<string, unknown> = {};
+      for (const [name, newForm] of [
+        ["ordinary", "(new)"],
+        ["repair", "(incomplete"],
+      ]) {
+        const directory = join(root, name);
+        mkdirSync(directory);
+        const path = join(directory, "sample.clj");
+        writeFileSync(path, "(old)");
+        let editStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+          editStarted = resolve;
+        });
+        let terminated = false;
+        let writes = 0;
+        const tools = captureRuntimeTools({
+          async invokeBabashka(_pi, request, signal) {
+            if ((request as Record<string, unknown>).operation === "read") {
+              return readSuccess({ open: true });
+            }
+            editStarted();
+            return new Promise((_resolve, reject) => {
+              signal?.addEventListener(
+                "abort",
+                () => {
+                  terminated = true;
+                  reject(new DOMException("child aborted", "AbortError"));
+                },
+                { once: true },
+              );
+            });
+          },
+          async openFile() {
+            writes += 1;
+            throw new Error("must not write");
+          },
+        });
+        const read = tools.find(
+          ({ name: toolName }) => toolName === "sexp_read",
+        );
+        const edit = tools.find(
+          ({ name: toolName }) => toolName === "sexp_edit",
+        );
+        await executeReadTool(read, { path }, directory);
+        const controller = new AbortController();
+        const pending = executeEditTool(
+          edit,
+          {
+            document: "D1",
+            edits: [{ new_form: newForm, operation: "replace", target: "§1" }],
+          },
+          directory,
+          controller.signal,
+        );
+        await started;
+        controller.abort();
+        const error = await caught(() => pending);
+        outcomes[name] = {
+          bounded: Buffer.byteLength(error?.message ?? "") <= 16_384,
+          code: (error as Error & { code?: string })?.code,
+          file: readFileSync(path, "utf8"),
+          terminated,
+          writes,
+        };
+      }
+      expect(outcomes).toEqual({
+        ordinary: {
+          bounded: true,
+          code: "cancelled",
+          file: "(old)",
+          terminated: true,
+          writes: 0,
+        },
+        repair: {
+          bounded: true,
+          code: "cancelled",
+          file: "(old)",
+          terminated: true,
+          writes: 0,
+        },
+      });
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  test("abort after candidate close cleans it before rename and preserves state", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-edit-"));
+    try {
+      const path = join(directory, "sample.clj");
+      writeFileSync(path, "(old)");
+      const oldState = { generation: "old" };
+      const candidateState = { generation: "candidate" };
+      const controller = new AbortController();
+      const requests: Array<Record<string, unknown>> = [];
+      let renames = 0;
+      const tools = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          const value = request as Record<string, unknown>;
+          requests.push(value);
+          return value.operation === "read"
+            ? readSuccess(oldState)
+            : editSuccess(candidateState);
+        },
+        async openFile(file, flags, mode) {
+          const handle = await nodeOpen(file, flags, mode);
+          return {
+            writeFile: handle.writeFile.bind(handle),
+            sync: handle.sync.bind(handle),
+            chmod: handle.chmod.bind(handle),
+            async close() {
+              await handle.close();
+              controller.abort();
+            },
+          };
+        },
+        async rename(source, destination) {
+          renames += 1;
+          return renameFile(source, destination);
+        },
+      });
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      await executeReadTool(read, { path }, directory);
+      const error = await caught(() =>
+        executeEditTool(
+          edit,
+          {
+            document: "D1",
+            edits: [{ new_form: "(new)", operation: "replace", target: "§1" }],
+          },
+          directory,
+          controller.signal,
+        ),
+      );
+      await executeReadTool(read, { document: "D1" }, directory);
+      expect({
+        code: (error as Error & { code?: string })?.code,
+        file: readFileSync(path, "utf8"),
+        renames,
+        state: (requests.at(-1)?.request as Record<string, unknown>).state,
+        tempFiles: readdirSync(directory).filter((name) =>
+          name.includes("pi-sexp-edit"),
+        ),
+      }).toEqual({
+        code: "cancelled",
+        file: "(old)",
+        renames: 0,
+        state: oldState,
+        tempFiles: [],
+      });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("runner classifies child abort and timeout with bounded diagnostics", async () => {
+    const run = processRunner();
+    expect(typeof run).toBe("function");
+    if (!run) return;
+    const controller = new AbortController();
+    let childStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      childStarted = resolve;
+    });
+    let terminated = false;
+    const aborted = run(
+      apiWithExec(async (_command, _args, options) => {
+        childStarted();
+        return new Promise((resolve) => {
+          options.signal?.addEventListener(
+            "abort",
+            () => {
+              terminated = true;
+              resolve({ code: 0, killed: true, stderr: "", stdout: "" });
+            },
+            { once: true },
+          );
+        });
+      }),
+      { operation: "read" },
+      controller.signal,
+    );
+    await started;
+    controller.abort();
+    const abortError = await caught(() => aborted);
+    const timeoutError = await caught(() =>
+      run(
+        apiWithExec(async () => ({
+          code: 0,
+          killed: true,
+          stderr: "x".repeat(100_000),
+          stdout: "",
+        })),
+        { operation: "read" },
+      ),
+    );
+    expect({
+      abortCode: (abortError as Error & { code?: string })?.code,
+      abortMessage: abortError?.message,
+      terminated,
+      timeoutBounded: Buffer.byteLength(timeoutError?.message ?? "") <= 16_384,
+      timeoutCode: (timeoutError as Error & { code?: string })?.code,
+      timeoutMessage: timeoutError?.message,
+    }).toEqual({
+      abortCode: "cancelled",
+      abortMessage:
+        "[cancelled] The operation was cancelled before the file was changed.",
+      terminated: true,
+      timeoutBounded: true,
+      timeoutCode: "timeout",
+      timeoutMessage:
+        "[timeout] Babashka exceeded its execution deadline before the file was changed.",
+    });
+  });
+
+  test("cancellation during request setup never starts Babashka and cleans material", async () => {
+    const run = processRunner();
+    expect(typeof run).toBe("function");
+    if (!run) return;
+    const controller = new AbortController();
+    let execs = 0;
+    const before = new Set(
+      readdirSync(tmpdir()).filter((name) => name.startsWith("pi-sexp-edit-")),
+    );
+    const request = {
+      toJSON() {
+        controller.abort();
+        return { operation: "read" };
+      },
+    };
+    const error = await caught(() =>
+      run(
+        apiWithExec(async () => {
+          execs += 1;
+          return { code: 0, stderr: "", stdout: successEnvelope() };
+        }),
+        request,
+        controller.signal,
+      ),
+    );
+    const leaked = readdirSync(tmpdir()).filter(
+      (name) => name.startsWith("pi-sexp-edit-") && !before.has(name),
+    );
+    expect({
+      code: (error as Error & { code?: string })?.code,
+      execs,
+      leaked,
+    }).toEqual({ code: "cancelled", execs: 0, leaked: [] });
+  });
+
+  test("read cancellation during private output creation removes artifact and preserves state", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-edit-"));
+    let artifactPath: string | undefined;
+    try {
+      const path = join(directory, "sample.clj");
+      writeFileSync(path, "(old)");
+      const oldState = { generation: "old" };
+      const hiddenState = { generation: "hidden" };
+      const requests: Array<Record<string, unknown>> = [];
+      const controller = new AbortController();
+      let readCalls = 0;
+      let formatCalls = 0;
+      const format = (
+        extensionModule as unknown as {
+          formatBoundedOutput(output: string): Promise<{
+            fullOutputPath?: string;
+            text: string;
+            truncation: {
+              outputBytes: number;
+              outputLines: number;
+              totalBytes: number;
+              totalLines: number;
+            };
+          }>;
+        }
+      ).formatBoundedOutput;
+      const huge = Array.from(
+        { length: 2002 },
+        (_, index) => `hidden-${index}\n`,
+      ).join("");
+      const tools = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          requests.push(request as Record<string, unknown>);
+          readCalls += 1;
+          if (readCalls === 1) return readSuccess(oldState);
+          if (readCalls === 2) return readSuccess(hiddenState, huge);
+          return readSuccess({ generation: "final" });
+        },
+        async formatOutput(output) {
+          formatCalls += 1;
+          const result = await format(output);
+          if (formatCalls === 2) {
+            artifactPath = result.fullOutputPath;
+            controller.abort();
+          }
+          return result;
+        },
+      });
+      const read = tools.find(({ name }) => name === "sexp_read");
+      await executeReadTool(read, { path }, directory);
+      const error = await caught(() =>
+        executeReadTool(read, { document: "D1" }, directory, controller.signal),
+      );
+      await executeReadTool(read, { document: "D1" }, directory);
+      expect({
+        artifactCreated: typeof artifactPath === "string",
+        artifactExists: existsSync(artifactPath ?? ""),
+        code: (error as Error & { code?: string })?.code,
+        followupState: (requests.at(-1)?.request as Record<string, unknown>)
+          .state,
+      }).toEqual({
+        artifactCreated: true,
+        artifactExists: false,
+        code: "cancelled",
+        followupState: hiddenState,
+      });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+      if (artifactPath)
+        rmSync(dirname(artifactPath), { force: true, recursive: true });
+    }
+  });
+
+  test("real Pi mutation queue prevents a built-in write from interleaving", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-edit-"));
+    try {
+      const path = join(directory, "sample.clj");
+      writeFileSync(path, "(old)");
+      const builtInWrite = realCreateWriteToolDefinition(directory, {
+        operations: {
+          async mkdir() {},
+          async writeFile(absolutePath, content) {
+            events.push("built-in-enter");
+            builtInEntered();
+            await release;
+            writeFileSync(absolutePath, content);
+            events.push("built-in-write");
+          },
+        },
+      });
+      const events: string[] = [];
+      let releaseBuiltIn!: () => void;
+      let builtInEntered!: () => void;
+      const release = new Promise<void>((resolve) => {
+        releaseBuiltIn = resolve;
+      });
+      const entered = new Promise<void>((resolve) => {
+        builtInEntered = resolve;
+      });
+      const tools = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          const value = request as Record<string, unknown>;
+          if (value.operation === "read") return readSuccess({ open: true });
+          events.push("extension-invoke");
+          expect((value.request as Record<string, unknown>).source).toBe(
+            "(built-in)",
+          );
+          return editSuccess({ candidate: true });
+        },
+      });
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      await executeReadTool(read, { path }, directory);
+      const builtIn = builtInWrite.execute(
+        "built-in-call",
+        { content: "(built-in)", path },
+        new AbortController().signal,
+        undefined,
+        { cwd: directory },
+      );
+      await entered;
+      const extensionEdit = executeEditTool(
+        edit,
+        {
+          document: "D1",
+          edits: [{ new_form: "(new)", operation: "replace", target: "§1" }],
+        },
+        directory,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(events).toEqual(["built-in-enter"]);
+      releaseBuiltIn();
+      await Promise.all([builtIn, extensionEdit]);
+      expect({ events, file: readFileSync(path, "utf8") }).toEqual({
+        events: ["built-in-enter", "built-in-write", "extension-invoke"],
+        file: "(new)",
+      });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
     }
   });
 });

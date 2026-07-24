@@ -139,11 +139,59 @@ function truncateUtf8(value: string, maximumBytes: number): string {
   return "";
 }
 
+type InterruptionCode = "cancelled" | "timeout";
+
+function interruptionError(code: InterruptionCode): Error {
+  return formatToolError(Object.assign(new Error(code), { code, data: {} }));
+}
+
+function cancellationError(error: unknown, signal?: AbortSignal): boolean {
+  const value = error as Error & { code?: unknown };
+  return (
+    signal?.aborted === true ||
+    value?.name === "AbortError" ||
+    value?.code === "ABORT_ERR" ||
+    value?.code === "cancelled"
+  );
+}
+
+function timeoutError(error: unknown): boolean {
+  const value = error as Error & { code?: unknown };
+  return value?.name === "TimeoutError" || value?.code === "ETIMEDOUT";
+}
+
+function ensureNotCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw interruptionError("cancelled");
+}
+
+async function invokeWithCancellation(
+  invoke: (
+    pi: ExtensionAPI,
+    request: unknown,
+    signal?: AbortSignal,
+  ) => Promise<ProtocolEnvelope>,
+  pi: ExtensionAPI,
+  request: unknown,
+  signal?: AbortSignal,
+): Promise<ProtocolEnvelope> {
+  ensureNotCancelled(signal);
+  try {
+    const envelope = await invoke(pi, request, signal);
+    ensureNotCancelled(signal);
+    return envelope;
+  } catch (error) {
+    if (cancellationError(error, signal)) throw interruptionError("cancelled");
+    if (timeoutError(error)) throw interruptionError("timeout");
+    throw error;
+  }
+}
+
 export async function invokeBabashka(
   pi: ExtensionAPI,
   request: unknown,
   signal?: AbortSignal,
 ): Promise<ProtocolEnvelope> {
+  ensureNotCancelled(signal);
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "pi-sexp-edit-"));
   try {
     await chmod(temporaryDirectory, 0o700);
@@ -154,20 +202,32 @@ export async function invokeBabashka(
       mode: 0o600,
     });
     await chmod(requestPath, 0o600);
+    ensureNotCancelled(signal);
 
-    const result = await pi.exec(
-      "bb",
-      [
-        "--config",
-        BB_CONFIG_PATH,
-        "-m",
-        "pi-sexp-edit.main",
-        "--request",
-        requestPath,
-      ],
-      { signal, timeout: BABASHKA_TIMEOUT_MS },
-    );
-    if (result.code !== 0 || result.killed) {
+    let result;
+    try {
+      result = await pi.exec(
+        "bb",
+        [
+          "--config",
+          BB_CONFIG_PATH,
+          "-m",
+          "pi-sexp-edit.main",
+          "--request",
+          requestPath,
+        ],
+        { signal, timeout: BABASHKA_TIMEOUT_MS },
+      );
+    } catch (error) {
+      if (cancellationError(error, signal))
+        throw interruptionError("cancelled");
+      if (timeoutError(error)) throw interruptionError("timeout");
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(truncateUtf8(message, MAX_DIAGNOSTIC_BYTES));
+    }
+    ensureNotCancelled(signal);
+    if (result.killed) throw interruptionError("timeout");
+    if (result.code !== 0) {
       const diagnostic = truncateUtf8(result.stderr, MAX_DIAGNOSTIC_BYTES);
       throw new Error(
         `Babashka exited with code ${result.code}${diagnostic ? `: ${diagnostic}` : ""}`,
@@ -520,7 +580,9 @@ export async function atomicReplaceFile(
   candidateSource: string,
   mode: number,
   dependencyOverrides: Partial<SexpExtensionDependencies> = {},
+  signal?: AbortSignal,
 ): Promise<void> {
+  ensureNotCancelled(signal);
   const dependencies = { ...defaultDependencies, ...dependencyOverrides };
   const temporaryPath = join(
     dirname(path),
@@ -534,6 +596,7 @@ export async function atomicReplaceFile(
     await handle.chmod(mode);
     await handle.close();
     handle = undefined;
+    ensureNotCancelled(signal);
     await dependencies.rename(temporaryPath, path);
   } finally {
     try {
@@ -727,6 +790,7 @@ function validateEditResult(
 }
 
 const errorExplanations: Record<string, string> = {
+  cancelled: "The operation was cancelled before the file was changed.",
   ambiguous: "The target no longer maps to exactly one unchanged form.",
   "batch-conflict":
     "The transactional edit batch contains conflicting targets or boundaries.",
@@ -737,6 +801,8 @@ const errorExplanations: Record<string, string> = {
   "invalid-form": "An edit operation or supplied form is invalid.",
   "repair-failed":
     "Delimiter repair was unsafe or did not produce valid source.",
+  timeout:
+    "Babashka exceeded its execution deadline before the file was changed.",
   unknown:
     "The target handle or document is unknown in this extension instance.",
   "write-failed":
@@ -826,12 +892,14 @@ export function createSexpExtension(
     description: readDescription,
     parameters: sexpReadSchema,
     async execute(_toolCallId, parameters, signal, _onUpdate, context) {
+      ensureNotCancelled(signal);
       const record =
         "path" in parameters
           ? await documents.openPath(parameters.path, context.cwd)
           : getPublicDocument(documents, parameters.document);
 
       return record.lock.run(async () => {
+        ensureNotCancelled(signal);
         const bytes = await dependencies.readFile(record.canonicalPath);
         const source = decodeSource(bytes);
         const payload: Record<string, unknown> = {
@@ -844,7 +912,8 @@ export function createSexpExtension(
         if (record.state !== undefined) payload.state = record.state;
         if ("target" in parameters) payload.target = parameters.target;
 
-        const envelope = await dependencies.invokeBabashka(
+        const envelope = await invokeWithCancellation(
+          dependencies.invokeBabashka,
           pi,
           { operation: "read", protocol_version: 1, request: payload },
           signal,
@@ -864,7 +933,14 @@ export function createSexpExtension(
         }
 
         record.state = envelope.state;
+        ensureNotCancelled(signal);
         const output = await dependencies.formatOutput(envelope.result.text);
+        try {
+          ensureNotCancelled(signal);
+        } catch (error) {
+          await discardBoundedOutput(output);
+          throw error;
+        }
         return {
           content: [{ type: "text" as const, text: output.text }],
           details: {
@@ -885,6 +961,7 @@ export function createSexpExtension(
     description: editDescription,
     parameters: sexpEditSchema,
     async execute(_toolCallId, parameters, signal) {
+      ensureNotCancelled(signal);
       const record = getPublicDocument(documents, parameters.document);
       if (record.state === undefined) {
         throw publicUnknownDocument(parameters.document);
@@ -892,10 +969,12 @@ export function createSexpExtension(
 
       return record.lock.run(() =>
         dependencies.withFileMutationQueue(record.canonicalPath, async () => {
+          ensureNotCancelled(signal);
           const bytes = await dependencies.readFile(record.canonicalPath);
           const source = decodeSource(bytes);
           const metadata = await dependencies.stat(record.canonicalPath);
-          const envelope = await dependencies.invokeBabashka(
+          const envelope = await invokeWithCancellation(
+            dependencies.invokeBabashka,
             pi,
             {
               operation: "edit",
@@ -934,9 +1013,13 @@ export function createSexpExtension(
               candidateSource,
               metadata.mode & 0o7777,
               dependencies,
+              signal,
             );
           } catch (error) {
             await discardBoundedOutput(output);
+            if (cancellationError(error, signal)) {
+              throw interruptionError("cancelled");
+            }
             throw formatToolError(
               Object.assign(
                 new Error("Atomic file replacement failed", { cause: error }),

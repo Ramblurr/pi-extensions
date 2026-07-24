@@ -127,12 +127,17 @@
   - Validation: full Clojure suite 182 tests / 508 assertions; Bun 38 tests; real read→external-comment→edit probe preserved the external text, mode 0640, extension-only diff, and new §2 handle; whitespace/newline checks pass.
   - Review: Pi Link review against `16c49bf` found one Critical omitted observation-state class, two Important atomic cleanup/name issues, and one Minor temporary-mode exposure; all were fixed tests-first, and follow-up review found no remaining findings.
 - [x] Task 24: Format bounded results and structured errors
-  - Commit: `tools: format bounded results and errors` (this task's commit)
+  - Commit: `e713da4 tools: format bounded results and errors`
   - Notes: Added deterministic complete edit reports, shared Pi head bounds, disclosed private full-output artifacts, structured bounded errors, strict pre-write metadata/repair validation, public unknown normalization, and confident bounded changed-target replacement context.
   - TDD: Initial RED was 3 missing-formatter behavior failures plus the old edit-output contract; GREEN is 46 Bun tests / 80 assertions and 184 Clojure tests / 510 assertions after metadata, artifact-ordering, stale-path, bounded-context, repair-binding, and state-less-record regressions.
   - Validation: full Bun and Clojure suites, focused REPL retry/stale-reuse/600-descendant probes, real Babashka metadata/retry probe, clj-kondo, cljfmt, Prettier, whitespace, and newline checks pass.
   - Review: Pi Link reviews against `6ed4db7` found pre-write metadata, real producer-shape, public-code, artifact-ordering, stale-path, repair-binding, and hidden-context-handle defects; all were fixed tests-first, and final follow-up found no remaining findings.
-- [ ] Task 25: Harden cancellation, timeout, concurrency, and write failures
+- [x] Task 25: Harden cancellation, timeout, concurrency, and write failures
+  - Commit: `tools: harden cancellation and concurrency` (this task's commit)
+  - Notes: Added structured cancellation/timeout boundaries, pre-exec and pre-rename abort checks, request/candidate/output cleanup, lifecycle-correct observation versus candidate commits, and real built-in-write queue serialization.
+  - TDD: Initial RED was 4 cancellation/timeout behavior failures; GREEN is 53 Bun tests / 91 assertions after request-setup, post-format observation, and production built-in queue review regressions.
+  - Validation: Bun 53 tests, repeated focused cancellation/concurrency tests, full Clojure suite 184 tests / 510 assertions, clj-kondo, cljfmt, Prettier, whitespace, and newline checks pass.
+  - Review: Pi Link reviews against `e713da4` found pre-exec timing, post-format cancellation, mocked queue evidence, observation retirement, and non-public import defects; all were fixed tests-first, and final follow-up found no remaining findings.
 - [ ] Task 26: Add read and reconciliation acceptance workflows
 - [ ] Task 27: Add transaction, repair, comment, and reload acceptance workflows
 - [ ] Task 28: Audit packaging, documentation, and the release contract
