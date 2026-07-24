@@ -366,3 +366,15 @@
 (defn structural-children [document path]
   (mapv #(node-at-path document %)
         (get (:children-by-path document) path [])))
+
+(defn canonical-structural-entries [document]
+  (loop [queue  (vec (structural-children document []))
+         cursor 0
+         result []]
+    (if (< cursor (count queue))
+      (let [entry (nth queue cursor)]
+        (recur (into queue
+                     (structural-children document (:path entry)))
+               (inc cursor)
+               (conj result entry)))
+      result)))

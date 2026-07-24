@@ -208,8 +208,8 @@
                                          :operation "replace"
                                          :target "§1"}])))
                       supplied-texts)]
-    (is (= {:active-current-handles #{"§1"}
-            :other-document-handle "§7"
+    (is (= {:active-current-handles #{"§1" "§2"}
+            :other-document-handle "§e"
             :supplied-form-sources (mapv vector supplied-texts)}
            {:active-current-handles (set (keys (:handles state)))
             :other-document-handle other-handle
@@ -221,19 +221,19 @@
   (let [old-source "(old)"
         current-source "(current)"
         opened     (opened-state old-source)
-        reconciled (:state (handles/reconcile-state opened current-source))
-        rendered   (render/render-opening
-                    (parse/parse-source current-source
-                                        {:document-id document-id})
-                    reconciled)
+        observed   (handles/reconcile-state opened current-source)
+        snapshot   (handles/prepare-snapshot (:document observed)
+                                             (:state observed))
+        rendered   (render/render-opening snapshot)
         state      (:state rendered)
+        target     (first (:created-handles rendered))
         result     (sut/validate-edit-request
                     (edit-request current-source
                                   state
                                   [{:new_form "§1"
                                     :operation "replace"
-                                    :target "§2"}]))]
-    (is (= {:active-handles #{"§2"}
+                                    :target target}]))]
+    (is (= {:active-handles #{"§3" "§4"}
             :forms ["§1"]
             :retired-reason :changed}
            {:active-handles (set (keys (:handles state)))
@@ -318,9 +318,11 @@
                             (handles/initial-state document-id
                                                    canonical-path
                                                    source)
-                            target)]
+                            target)
+        advertised (handles/advertise-handle allocated handle)
+        prepared   (handles/prepare-snapshot document advertised)]
     {:handle handle
-     :state  (handles/advertise-handle allocated handle)}))
+     :state  (:state prepared)}))
 
 (defn- mutation-case [source target-source operation]
   (let [{:keys [handle state]} (state-with-target source target-source)
@@ -555,14 +557,21 @@
 
 (defn- batch-context [source target-sources]
   (let [document (parse/parse-source source {:document-id document-id})
-        entries  (distinct-target-entries document target-sources)]
-    (reduce (fn [{:keys [handles state]} entry]
-              (let [[allocated handle] (handles/allocate-handle state entry)]
-                {:handles (conj handles handle)
-                 :state (handles/advertise-handle allocated handle)}))
-            {:handles []
-             :state (handles/initial-state document-id canonical-path source)}
-            entries)))
+        entries  (distinct-target-entries document target-sources)
+        allocated
+        (reduce (fn [{:keys [handles state]} entry]
+                  (let [[allocated handle]
+                        (handles/allocate-handle state entry)]
+                    {:handles (conj handles handle)
+                     :state (handles/advertise-handle allocated handle)}))
+                {:handles []
+                 :state (handles/initial-state document-id
+                                               canonical-path
+                                               source)}
+                entries)]
+    (assoc allocated
+           :state (:state (handles/prepare-snapshot document
+                                                    (:state allocated))))))
 
 (defn- indexed-edits [handles edits]
   (mapv (fn [edit]
@@ -979,17 +988,24 @@
 
 (defn- issued-context [source specs]
   (let [document (parse/parse-source source {:document-id document-id})
-        entries  (distinct-target-entries document (mapv :source specs))]
-    (reduce (fn [{:keys [handles state]} [entry spec]]
-              (let [[allocated handle] (handles/allocate-handle state entry)
-                    next-state (if (:advertised? spec)
-                                 (handles/advertise-handle allocated handle)
-                                 allocated)]
-                {:handles (conj handles handle)
-                 :state next-state}))
-            {:handles []
-             :state (handles/initial-state document-id canonical-path source)}
-            (map vector entries specs))))
+        entries  (distinct-target-entries document (mapv :source specs))
+        allocated
+        (reduce (fn [{:keys [handles state]} [entry spec]]
+                  (let [[allocated handle]
+                        (handles/allocate-handle state entry)
+                        next-state (if (:advertised? spec)
+                                     (handles/advertise-handle allocated handle)
+                                     allocated)]
+                    {:handles (conj handles handle)
+                     :state next-state}))
+                {:handles []
+                 :state (handles/initial-state document-id
+                                               canonical-path
+                                               source)}
+                (map vector entries specs))]
+    (assoc allocated
+           :state (:state (handles/prepare-snapshot document
+                                                    (:state allocated))))))
 
 (defn- issued-edit [source specs operation]
   (let [{:keys [handles state]} (issued-context source specs)
@@ -1035,11 +1051,12 @@
         result (get-in outcome [:value :result])]
     (is (= {:active-old? false
             :baseline source
-            :created-handles ["§2"]
+            :created-handles ["§4"]
             :retired-handles [old-handle]
             :retired-reason :replaced}
-           {:active-old? (some? (handles/resolve-handle (:state result)
-                                                        old-handle))
+           {:active-old? (some? (handles/resolve-active-handle
+                                 (:state result)
+                                 old-handle))
             :baseline (get-in result [:state :baseline-source])
             :created-handles (:created-handles result)
             :retired-handles (:retired-handles result)
@@ -1095,7 +1112,7 @@
            {:changed-reason (get-in state
                                     [:retired-handles changed :reason])
             :outer-reason (get-in state [:retired-handles outer :reason])
-            :stable-active? (some? (handles/resolve-handle state stable))
+            :stable-active? (some? (handles/resolve-active-handle state stable))
             :stable-source (:source
                             (parse/node-at-path
                              (:candidate-document result)
@@ -1113,7 +1130,7 @@
         result (get-in outcome [:value :result])
         state (:state result)]
     (is (= (set (:handles outcome))
-           (set (filter #(handles/resolve-handle state %)
+           (set (filter #(handles/resolve-active-handle state %)
                         (:handles outcome)))))))
 
 (deftest rendered-replacements-insertions-and-ancestors-get-visible-new-handles
@@ -1143,7 +1160,7 @@
                                   "(nested)"]}
            {:insertion-created (created-sources insertion-result)
             :insertion-preserved-boundary?
-            (some? (handles/resolve-handle
+            (some? (handles/resolve-active-handle
                     (:state insertion-result)
                     (second (:handles insertion))))
             :replacement-created (created-sources replacement-result)}))))
@@ -1159,10 +1176,10 @@
         [hidden target] (:handles outcome)
         result (get-in outcome [:value :result])]
     (is (= {:baseline (:candidate-source result)
-            :created-handles ["§3" "§4" "§5"]
-            :excerpt-handles ["§3" "§4" "§5"]
+            :created-handles ["§6" "§7" "§9"]
+            :excerpt-handles ["§6" "§7" "§9"]
             :hidden-reason :changed
-            :omitted-internal-counts {:retired-handles 1}
+            :omitted-internal-counts {:retired-handles 3}
             :retired-handles [target]
             :target-reason :replaced}
            {:baseline (get-in result [:state :baseline-source])
@@ -1213,11 +1230,11 @@
                                                           "unrelated"))
             :follow-up-source (:candidate-source follow-up)
             :replacement-handle-active?
-            (some? (handles/resolve-handle (:state result)
-                                           replacement-handle))}))))
+            (some? (handles/resolve-active-handle (:state result)
+                                                  replacement-handle))}))))
 
 (defn- active-structural-index [state handle]
-  (some-> (handles/resolve-handle state handle) :path last :index))
+  (some-> (handles/resolve-active-handle state handle) :path last :index))
 
 (deftest controlled-duplicate-mutations-preserve-unaffected-occurrences
   (let [inserted (issued-edit

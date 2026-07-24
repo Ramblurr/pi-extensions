@@ -12,6 +12,23 @@
   [(parse/parse-source source {:document-id "D4"})
    (handles/initial-state "D4" "src/example.clj" source)])
 
+(defn- render-opening
+  ([document state]
+   (render-opening document state {}))
+  ([document state options]
+   (sut/render-opening (handles/prepare-snapshot document state) options)))
+
+(defn- render-target
+  ([document state target]
+   (render-target document state target {}))
+  ([document state target options]
+   (let [snapshot (handles/prepare-snapshot document state)
+         manifest (handles/resolve-advertised-handle (:state snapshot) target)]
+     (sut/render-target snapshot
+                        {:entry (parse/node-at-path document (:path manifest))
+                         :handle target}
+                        options))))
+
 (defn- advertised-handles [state]
   (->> (:handles state)
        (keep (fn [[handle manifest]]
@@ -30,7 +47,7 @@
                     "  (let [fee (fee-for x)]\n"
                     "    (+ x fee)))\n")
         [document state] (document-state source)
-        result           (sut/render-opening document state)]
+        result           (render-opening document state)]
     (is (= {:advertised-handles #{"§1" "§2"}
             :created-handles    ["§1" "§2"]
             :source             source
@@ -48,17 +65,17 @@
                     "  (let [fee (fee-for x)]\n"
                     "    (+ x fee)))")
         [document state] (document-state source)
-        opening          (sut/render-opening document state)
+        opening          (render-opening document state)
         target           (first (:created-handles opening))
-        inspection       (sut/render-target document (:state opening) target)]
-    (is (= {:advertised-handles #{"§1" "§2" "§3" "§4" "§5"}
-            :created-handles    ["§2" "§3" "§4" "§5"]
+        inspection       (render-target document (:state opening) target)]
+    (is (= {:advertised-handles #{"§1" "§4" "§5" "§8" "§9"}
+            :created-handles    ["§4" "§5" "§8" "§9"]
             :source             source
             :text               (str "document: D4\n"
                                      "target: §1\n\n"
-                                     "§1 (defn calculate-total §2 [x]\n"
-                                     "  §3 (let §4 [...]\n"
-                                     "    §5 (+ ...)))")}
+                                     "§1 (defn calculate-total §4 [x]\n"
+                                     "  §5 (let §8 [...]\n"
+                                     "    §9 (+ ...)))")}
            {:advertised-handles (advertised-handles (:state inspection))
             :created-handles    (:created-handles inspection)
             :source             (:source inspection)
@@ -68,13 +85,13 @@
   (let [source "[(nested value) '(quoted)]"
         [document state] (document-state source)]
     (with-redefs [handles/handle-marker "H"]
-      (let [result (sut/render-opening document state {:depth 2})]
-        (is (= {:advertised-handles #{"H1" "H2" "H3" "H4"}
-                :created-handles    ["H1" "H2" "H3" "H4"]
+      (let [result (render-opening document state {:depth 2})]
+        (is (= {:advertised-handles #{"H1" "H2" "H3" "H6"}
+                :created-handles    ["H1" "H2" "H3" "H6"]
                 :text               (str "document: D4\n"
                                          "path: src/example.clj\n\n"
                                          "H1 [H2 (nested value) "
-                                         "H3 'H4 (quoted ...)]")}
+                                         "H3 'H6 (quoted ...)]")}
                {:advertised-handles (advertised-handles (:state result))
                 :created-handles    (:created-handles result)
                 :text               (:text result)}))))))
@@ -82,10 +99,11 @@
 (deftest atoms-remain-visible-without-handles-by-default
   (let [source "[sym :kw \"text\" \\c true false nil 42 4.2]"
         [document state] (document-state source)
-        result           (sut/render-opening document state {:depth 1})]
-    (is (= {:active-handles     #{"§1"}
+        result           (render-opening document state {:depth 1})]
+    (is (= {:active-handles     (set (map handles/format-handle
+                                          (range 1 11)))
             :created-handles    ["§1"]
-            :next-handle-id     2
+            :next-handle-id     11
             :text               (str "document: D4\n"
                                      "path: src/example.clj\n\n"
                                      "§1 [sym :kw \"text\" \\c "
@@ -98,10 +116,10 @@
 (deftest include-atoms-annotates-every-visible-atom
   (let [source "[sym :kw \"text\" \\c true false nil 42 4.2]"
         [document state] (document-state source)
-        result           (sut/render-opening document
-                                             state
-                                             {:depth 1
-                                              :include-atoms? true})]
+        result           (render-opening document
+                                         state
+                                         {:depth 1
+                                          :include-atoms? true})]
     (is (= {:advertised-handles (set (map handles/format-handle (range 1 11)))
             :created-handles    (mapv handles/format-handle (range 1 11))
             :next-handle-id     11
@@ -118,10 +136,10 @@
 (deftest multiline-strings-follow-atom-handle-policy
   (let [source "\"first\nsecond\""
         [document state] (document-state source)
-        default-result   (sut/render-opening document state)
-        atom-result      (sut/render-opening document
-                                             state
-                                             {:include-atoms? true})]
+        default-result   (render-opening document state)
+        atom-result      (render-opening document
+                                         state
+                                         {:include-atoms? true})]
     (is (= {:atom-created-handles    ["§1"]
             :atom-text               (str "document: D4\n"
                                           "path: src/example.clj\n\n"
@@ -138,12 +156,12 @@
 (deftest comments-and-trivia-render-without-handles
   (let [source "(wrapper [a, ; note\n  b])"
         [document state] (document-state source)
-        result           (sut/render-opening document state {:depth 2})]
-    (is (= {:active-handles  #{"§1" "§2"}
+        result           (render-opening document state {:depth 2})]
+    (is (= {:active-handles  #{"§1" "§2" "§3" "§4" "§5"}
             :source          source
             :text            (str "document: D4\n"
                                   "path: src/example.clj\n\n"
-                                  "§1 (wrapper §2 [a, ; note\n"
+                                  "§1 (wrapper §3 [a, ; note\n"
                                   "  b])")
             :trivia-handles  []}
            {:active-handles (set (keys (get-in result [:state :handles])))
@@ -163,14 +181,14 @@
 (deftest collapsed-visible-nodes-retain-handles
   (let [source "(outer (middle value))"
         [document state] (document-state source)
-        result           (sut/render-opening document state {:depth 1})]
-    (is (= {:created-handles ["§1" "§2"]
+        result           (render-opening document state {:depth 1})]
+    (is (= {:created-handles ["§1" "§3"]
             :middle-manifest {:advertised? true
                               :concrete-hash (:concrete-hash
                                               (entry-with-source
                                                document
                                                "(middle value)"))
-                              :handle        "§2"
+                              :handle        "§3"
                               :node-tag      :list
                               :path          (:path (entry-with-source
                                                      document
@@ -178,41 +196,41 @@
                               :status        :active}
             :text             (str "document: D4\n"
                                    "path: src/example.clj\n\n"
-                                   "§1 (outer §2 (middle ...))")}
+                                   "§1 (outer §3 (middle ...))")}
            {:created-handles (:created-handles result)
-            :middle-manifest (get-in result [:state :handles "§2"])
+            :middle-manifest (get-in result [:state :handles "§3"])
             :text            (:text result)}))))
 
 (deftest increasing-depth-advertises-only-newly-visible-nodes
   (let [source "(outer (middle (inner value)))"
         [document state] (document-state source)
-        collapsed        (sut/render-opening document state)
-        one-level        (sut/render-opening document
-                                             (:state collapsed)
-                                             {:depth 1})
-        two-levels       (sut/render-opening document
-                                             (:state one-level)
-                                             {:depth 2})
-        repeated         (sut/render-opening document
-                                             (:state two-levels)
-                                             {:depth 2})]
+        collapsed        (render-opening document state)
+        one-level        (render-opening document
+                                         (:state collapsed)
+                                         {:depth 1})
+        two-levels       (render-opening document
+                                         (:state one-level)
+                                         {:depth 2})
+        repeated         (render-opening document
+                                         (:state two-levels)
+                                         {:depth 2})]
     (is (= {:advertised-counts [1 2 3 3]
             :baseline-sources [source source source source]
-            :created-handles  [["§1"] ["§2"] ["§3"] []]
-            :next-handle-ids  [2 3 4 4]
+            :created-handles  [["§1"] ["§3"] ["§5"] []]
+            :next-handle-ids  [8 8 8 8]
             :result-sources   [source source source source]
             :texts            [(str "document: D4\n"
                                     "path: src/example.clj\n\n"
                                     "§1 (outer (middle ...) ...)")
                                (str "document: D4\n"
                                     "path: src/example.clj\n\n"
-                                    "§1 (outer §2 (middle ...))")
+                                    "§1 (outer §3 (middle ...))")
                                (str "document: D4\n"
                                     "path: src/example.clj\n\n"
-                                    "§1 (outer §2 (middle §3 (inner ...)))")
+                                    "§1 (outer §3 (middle §5 (inner ...)))")
                                (str "document: D4\n"
                                     "path: src/example.clj\n\n"
-                                    "§1 (outer §2 (middle §3 (inner ...)))")]}
+                                    "§1 (outer §3 (middle §5 (inner ...)))")]}
            {:advertised-counts (mapv (comp count advertised-handles :state)
                                      [collapsed one-level two-levels repeated])
             :baseline-sources (mapv #(get-in % [:state :baseline-source])
@@ -231,9 +249,9 @@
         [document state] (document-state source)
         nested           (entry-with-source document "(nested value)")
         [allocated nested-handle] (handles/allocate-handle state nested)
-        result            (sut/render-opening document allocated {:depth 1})]
+        result            (render-opening document allocated {:depth 1})]
     (is (= {:advertised-handles #{"§1" "§2"}
-            :created-handles    ["§2"]
+            :created-handles    ["§2" "§1"]
             :nested-handle      "§1"
             :text               (str "document: D4\n"
                                      "path: src/example.clj\n\n"
@@ -246,7 +264,7 @@
 (deftest annotations-never-enter-exact-rendered-source
   (let [source "(outer (nested value))\n"
         [document state] (document-state source)
-        result           (sut/render-opening document state {:depth 2})
+        result           (render-opening document state {:depth 2})
         reparsed         (parse/parse-source (:source result)
                                              {:document-id "D4"})]
     (is (= {:baseline-source source
@@ -286,7 +304,7 @@
             :state          {:baseline-source source
                              :canonical-path "src/example.clj"
                              :document-id "D4"
-                             :next-handle-id 3
+                             :next-handle-id 8
                              :retired-handles {}}}
            {:active-handles (advertised-handles state)
             :response       (select-keys response
@@ -301,15 +319,15 @@
         refreshed  (sut/read-source {:source new-source
                                      :state  (:state opened)})
         state      (:state refreshed)]
-    (is (= {:active-handles #{"§2"}
+    (is (= {:active-handles #{"§6"}
             :baseline-source new-source
-            :created-handles ["§2"]
+            :created-handles ["§6"]
             :document-id "D4"
-            :next-handle-id 3
-            :retired-reasons {"§1" :changed}
+            :next-handle-id 8
+            :retired-reasons {"§1" :changed "§5" :changed}
             :text (str "document: D4\n"
                        "path: src/example.clj\n\n"
-                       "§2 (defn alpha ...)")}
+                       "§6 (defn alpha ...)")}
            {:active-handles (advertised-handles state)
             :baseline-source (:baseline-source state)
             :created-handles (get-in refreshed [:result :created-handles])
@@ -328,13 +346,13 @@
         refreshed  (sut/read-source {:source new-source
                                      :state  (:state opened)})
         state      (:state refreshed)]
-    (is (= {:active-handles #{"§2" "§3"}
+    (is (= {:active-handles #{"§2" "§b"}
             :beta-manifest old-beta
-            :created-handles ["§3"]
-            :retired-reasons {"§1" :changed}
+            :created-handles ["§b"]
+            :retired-reasons {"§1" :changed "§6" :changed}
             :text (str "document: D4\n"
                        "path: src/example.clj\n\n"
-                       "§3 (defn alpha ...)\n"
+                       "§b (defn alpha ...)\n"
                        "§2 (defn beta ...)")}
            {:active-handles (advertised-handles state)
             :beta-manifest (get-in state [:handles "§2"])
@@ -351,13 +369,13 @@
         inspected (sut/read-source {:source source
                                     :state  (:state opened)
                                     :target target})]
-    (is (= {:active-handles #{"§1" "§2" "§3" "§4" "§5"}
-            :created-handles ["§2" "§3" "§4" "§5"]
+    (is (= {:active-handles #{"§1" "§4" "§5" "§8" "§9"}
+            :created-handles ["§4" "§5" "§8" "§9"]
             :text (str "document: D4\n"
                        "target: §1\n\n"
-                       "§1 (defn calculate-total §2 [x]\n"
-                       "  §3 (let §4 [...]\n"
-                       "    §5 (+ ...)))")}
+                       "§1 (defn calculate-total §4 [x]\n"
+                       "  §5 (let §8 [...]\n"
+                       "    §9 (+ ...)))")}
            {:active-handles (advertised-handles (:state inspected))
             :created-handles (get-in inspected [:result :created-handles])
             :text (get-in inspected [:result :text])}))))
@@ -373,7 +391,9 @@
                                   :state  state
                                   :target "§1"})]
     (is (= {:retired {:error {:code :changed
-                              :data {:target "§1"}
+                              :data {:excerpt "§3 (changed)"
+                                     :replacement-handle "§3"
+                                     :target "§1"}
                               :message "Handle §1 is retired"}
                       :ok false
                       :protocol_version 1}
@@ -458,7 +478,7 @@
 
 (defn- rendered-opening-text [source]
   (let [[document state] (document-state source)]
-    (:text (sut/render-opening document state))))
+    (:text (render-opening document state))))
 
 (deftest trusted-forms-without-docstrings-show-names-and-no-body
   (let [source (str "(defn public-name [x] (sentinel-public x))\n"

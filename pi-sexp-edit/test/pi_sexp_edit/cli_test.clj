@@ -295,3 +295,37 @@
                result)))
       (finally
         (delete-tree directory)))))
+
+(defn- defining-handles [text]
+  (into {}
+        (map (fn [[_match handle defined-name]]
+               [defined-name handle]))
+        (re-seq #"(§[0-9a-z]+) \(defn-? ([^ \n]+)" text)))
+
+(deftest fresh-cli-depths-share-handles-for-common-structural-occurrences
+  (let [file    (io/file (project-root) "src/pi_sexp_edit/diff.clj")
+        path    (.getCanonicalPath file)
+        results (mapv #(invoke-cli "read" path "--depth" (str %))
+                      [0 1 2])
+        text-maps (mapv (comp #(select-keys %
+                                            ["advance-diagonal"
+                                             "unified-diff"])
+                              defining-handles
+                              :out)
+                        results)
+        json-result (invoke-cli "read"
+                                path
+                                "--depth"
+                                "2"
+                                "--format"
+                                "json")
+        json-map (-> json-result
+                     :out
+                     decoded-json
+                     (get-in [:result :text])
+                     defining-handles
+                     (select-keys ["advance-diagonal" "unified-diff"]))]
+    (is (every? #(= {:err "" :exit 0} (select-keys % [:err :exit]))
+                results))
+    (is (= (vec (repeat 3 (first text-maps))) text-maps))
+    (is (= (first text-maps) json-map))))

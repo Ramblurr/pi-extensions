@@ -70,9 +70,6 @@
       (contains? form-operations normalized)
       (assoc :new-form new_form))))
 
-(defn- retired-code [reason]
-  (if (= :replaced reason) :changed reason))
-
 (def ^:private context-preview-characters 256)
 
 (defn- bounded-context-preview [source]
@@ -86,56 +83,31 @@
     (str (subs source 0 safe-end)
          (when truncated? " … [truncated]"))))
 
-(defn- changed-target-context
-  [state document reconciliation target retired]
-  (when (= :changed (get-in reconciliation [:handle-statuses target]))
-    (let [current-path (get-in reconciliation
-                               [:pairs (:path retired) :current-path])
-          current-entry (when current-path
-                          (parse/node-at-path document current-path))]
-      (when (and (seq current-path) current-entry)
-        (let [[allocated replacement-handle]
-              (handles/allocate-handle state current-entry)
-              advertised (handles/advertise-handle allocated
-                                                   replacement-handle)]
-          {:excerpt (str replacement-handle
-                         " "
-                         (bounded-context-preview (:source current-entry)))
-           :replacement-handle replacement-handle
-           :state advertised})))))
+(defn- target-exception [target resolution]
+  (let [code        (get-in resolution [:error :code])
+        snapshot    (:prepared resolution)
+        replacement (:replacement-handle resolution)
+        entry       (:replacement-entry resolution)]
+    (ex-info (if (= :unknown code)
+               (str "Unknown handle " target)
+               (str "Handle " target " is retired"))
+             (cond-> {:code code
+                      :state (:state snapshot)
+                      :target target}
+               replacement
+               (assoc :excerpt (str replacement
+                                    " "
+                                    (bounded-context-preview (:source entry)))
+                      :replacement-handle replacement)))))
 
-(defn- target-exception [state document reconciliation target]
-  (if-let [retired (get-in state [:retired-handles target])]
-    (let [code    (retired-code (:reason retired))
-          context (when (= :changed code)
-                    (changed-target-context state
-                                            document
-                                            reconciliation
-                                            target
-                                            retired))]
-      (ex-info (str "Handle " target " is retired")
-               (merge {:code   code
-                       :state  state
-                       :target target}
-                      context)))
-    (ex-info (str "Unknown handle " target)
-             {:code   :unknown
-              :state  state
-              :target target})))
-
-(defn- resolve-target [state document reconciliation edit]
-  (let [target   (:target edit)
-        manifest (handles/resolve-handle state target)]
-    (when-not manifest
-      (throw (target-exception state document reconciliation target)))
-    (let [entry (parse/node-at-path document (:path manifest))]
-      (when-not entry
-        (throw (ex-info "Active handle path is absent from the pre-edit tree"
-                        {:code   :internal-state-error
-                         :reason :active-target-path-not-found
-                         :state  state
-                         :target target})))
-      (assoc edit :target-entry entry))))
+(defn- resolve-target [snapshot reconciliation edit]
+  (let [target     (:target edit)
+        resolution (handles/resolve-public-target snapshot
+                                                  reconciliation
+                                                  target)]
+    (when (:error resolution)
+      (throw (target-exception target resolution)))
+    (assoc edit :target-entry (:entry resolution))))
 
 (def ^:private destructive-operations
   #{:delete :replace})
@@ -234,11 +206,15 @@
                            {:edit-index edit-index})))
     (assoc parsed :forms forms)))
 
-(defn- copied-active-handle [state supplied-document]
-  (let [active-handles (set (keys (:handles state)))]
+(defn- copied-advertised-handle [state supplied-document]
+  (let [advertised-handles (into #{}
+                                 (keep (fn [[handle manifest]]
+                                         (when (:advertised? manifest)
+                                           handle)))
+                                 (:handles state))]
     (some (fn [entry]
             (when (and (= :symbol (:atom-kind entry))
-                       (contains? active-handles (:source entry)))
+                       (contains? advertised-handles (:source entry)))
               (:source entry)))
           (:nodes supplied-document))))
 
@@ -246,7 +222,7 @@
   (if-let [supplied-source (:new-form edit)]
     (let [{:keys [document forms repair source]}
           (parsed-forms state edit-index supplied-source)]
-      (when-let [handle (copied-active-handle state document)]
+      (when-let [handle (copied-advertised-handle state document)]
         (throw (invalid-form state
                              :active-handle-token
                              {:edit-index edit-index
@@ -261,25 +237,26 @@
     edit))
 
 (defn validate-edit-request
-  "Reconciles and validates one edit request against a single pre-edit tree.
+  "Reconciles and validates one edit request against a prepared pre-edit tree.
 
   Every target in `:edits` is resolved before any supplied form is parsed."
   [{:keys [edits source state]}]
   (let [external-changes? (not= source (:baseline-source state))
         observed          (handles/reconcile-state state source)
-        observed-state    (:state observed)
-        reconciliation    (:reconciliation observed)
-        document          (parse/parse-source
-                           source
-                           {:document-id (:document-id observed-state)})
+        snapshot          (assoc
+                           (handles/prepare-snapshot (:document observed)
+                                                     (:state observed))
+                           :reconciliation (:reconciliation observed))
+        observed-state    (:state snapshot)
+        reconciliation    (:reconciliation snapshot)
+        document          (:document snapshot)
         operations        (->> (validate-edit-array! observed-state edits)
                                (map-indexed #(normalized-operation
                                               observed-state
                                               %1
                                               %2))
                                vec)
-        resolved-edits    (mapv #(resolve-target observed-state
-                                                 document
+        resolved-edits    (mapv #(resolve-target snapshot
                                                  reconciliation
                                                  %)
                                 operations)

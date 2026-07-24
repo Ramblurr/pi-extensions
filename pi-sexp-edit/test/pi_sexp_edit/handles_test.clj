@@ -93,10 +93,10 @@
   (let [[allocated handle] (sut/allocate-handle (initial-state "D1")
                                                 (synthetic-entry 0))
         advertised         (sut/advertise-handle allocated handle)
-        manifest           (sut/resolve-handle advertised handle)
+        manifest           (sut/resolve-active-handle advertised handle)
         retired            (sut/retire-handle advertised handle :changed)]
     (is (= handle (:handle manifest)))
-    (is (nil? (sut/resolve-handle retired handle)))
+    (is (nil? (sut/resolve-active-handle retired handle)))
     (is (not (contains? (:handles retired) handle)))
     (is (= (assoc manifest :status :retired :reason :changed)
            (get-in retired [:retired-handles handle])))))
@@ -110,8 +110,9 @@
     (is (= retired retired-again))
     (is (not= old-id new-id))
     (is (= :changed (get-in reallocated [:retired-handles old-id :reason])))
-    (is (nil? (sut/resolve-handle reallocated old-id)))
-    (is (= new-id (:handle (sut/resolve-handle reallocated new-id))))))
+    (is (nil? (sut/resolve-active-handle reallocated old-id)))
+    (is (= new-id
+           (:handle (sut/resolve-active-handle reallocated new-id))))))
 
 (deftest allocation-skips-active-and-retired-ids-even-with-a-stale-counter
   (let [[allocated first-id] (sut/allocate-handle (initial-state "D1")
@@ -132,9 +133,9 @@
     (is (= "§1" handle other))
     (is (= "D1" (:document-id first-state)))
     (is (= "D2" (:document-id second-state)))
-    (is (nil? (sut/resolve-handle second-empty handle)))
-    (is (not= (:path (sut/resolve-handle first-state handle))
-              (:path (sut/resolve-handle second-state other))))))
+    (is (nil? (sut/resolve-active-handle second-empty handle)))
+    (is (not= (:path (sut/resolve-active-handle first-state handle))
+              (:path (sut/resolve-active-handle second-state other))))))
 
 (deftest state-keeps-baseline-and-compact-active-manifests
   (let [source        "(same)\r\n"
@@ -182,7 +183,7 @@
   (let [[state handle] (sut/allocate-handle (initial-state "D1")
                                             (synthetic-entry 0))
         inconsistent   (assoc-in state [:handles handle :status] :retired)]
-    (is (nil? (sut/resolve-handle inconsistent handle)))))
+    (is (nil? (sut/resolve-active-handle inconsistent handle)))))
 
 (deftest an-existing-retirement-record-wins-over-an-active-collision
   (let [[state handle] (sut/allocate-handle (initial-state "D1")
@@ -195,7 +196,7 @@
                                    first-retirement)]
     (is (= overlapping
            (sut/retire-handle overlapping handle :deleted)))
-    (is (nil? (sut/resolve-handle overlapping handle)))
+    (is (nil? (sut/resolve-active-handle overlapping handle)))
     (is (= :changed
            (get-in overlapping [:retired-handles handle :reason])))))
 
@@ -390,7 +391,7 @@
                       [old-function old-sum])
         transitioned   (:state (reconcile-document-state state
                                                          current-source))
-        sum-manifest   (sut/resolve-handle transitioned sum-handle)]
+        sum-manifest   (sut/resolve-active-handle transitioned sum-handle)]
     (is (= {:active-sum     {:concrete-hash (:concrete-hash current-sum)
                              :node-tag     (:tag current-sum)
                              :path         (:path current-sum)
@@ -469,7 +470,8 @@
               [state [container-handle child-handle]]
               (allocate-all (initial-state "D1" old) [container child])
               transitioned (:state (reconcile-document-state state current))
-              child-manifest (sut/resolve-handle transitioned child-handle)]
+              child-manifest (sut/resolve-active-handle transitioned
+                                                        child-handle)]
           (is (= {:child          {:concrete-hash (:concrete-hash current-child)
                                    :path          (:path current-child)
                                    :status        :active}
@@ -550,8 +552,9 @@
                                           [:retired-handles
                                            old-handle
                                            :reason])
-            :old-resolves?        (some? (sut/resolve-handle rendered-state
-                                                             old-handle))
+            :old-resolves?        (some? (sut/resolve-active-handle
+                                          rendered-state
+                                          old-handle))
             :reconciliation       (get-in reappeared-result
                                           [:reconciliation
                                            :handle-statuses])

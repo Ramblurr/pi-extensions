@@ -52,9 +52,11 @@
                      (parse/structural-children document []))
         [state handle] (handles/allocate-handle
                         (handles/initial-state document-id canonical-path source)
-                        target)]
+                        target)
+        advertised (handles/advertise-handle state handle)
+        prepared   (handles/prepare-snapshot document advertised)]
     {:handle handle
-     :state (handles/advertise-handle state handle)}))
+     :state (:state prepared)}))
 
 (deftest identical-text-produces-no-hunks-or-headers
   (is (= "" (diff/unified-diff "(same)\n" "(same)\n" canonical-path))))

@@ -37,12 +37,17 @@
 
 (defn- state-with-target [source target-source]
   (let [document (parse/parse-source source {:document-id document-id})
-        target (some #(when (= target-source (:source %)) %) (:nodes document))
+        target (some #(when (and (:structural? %)
+                                 (= target-source (:source %)))
+                        %)
+                     (:nodes document))
         [state handle] (handles/allocate-handle
                         (handles/initial-state document-id canonical-path source)
-                        target)]
+                        target)
+        advertised (handles/advertise-handle state handle)
+        prepared   (handles/prepare-snapshot document advertised)]
     {:handle handle
-     :state (handles/advertise-handle state handle)}))
+     :state (:state prepared)}))
 
 (defn- exception-data [thunk]
   (try
@@ -190,7 +195,8 @@
             :excerpt-has-replacement? (str/includes? excerpt replacement)
             :ok (:ok response)
             :replacement-active?
-            (some? (handles/resolve-handle (:state response) replacement))
+            (some? (handles/resolve-active-handle (:state response)
+                                                  replacement))
             :retired-reason (get-in response
                                     [:state :retired-handles handle :reason])
             :retry-candidate (get-in retry [:result :candidate-source])}))))
@@ -246,20 +252,24 @@
         excerpt (get-in response [:error :data :excerpt])
         replacement (get-in response [:error :data :replacement-handle])
         new-handles (remove #(contains? (:handles state) %)
-                            (keys (get-in response [:state :handles])))]
-    (is (= {:all-new-handles-visible? true
+                            (keys (get-in response [:state :handles])))
+        advertised-new (filter #(get-in response
+                                        [:state :handles % :advertised?])
+                               new-handles)
+        hidden-new (remove (set advertised-new) new-handles)]
+    (is (= {:advertised-new-handles [replacement]
             :bounded? true
             :code :changed
-            :marked? true
-            :new-handles [replacement]}
-           {:all-new-handles-visible?
-            (every? #(and (get-in response [:state :handles % :advertised?])
-                          (str/includes? excerpt %))
-                    new-handles)
+            :hidden-count-positive? true
+            :hidden-omitted? true
+            :marked? true}
+           {:advertised-new-handles (vec advertised-new)
             :bounded? (<= (alength (.getBytes excerpt "UTF-8")) 1200)
             :code (get-in response [:error :code])
-            :marked? (str/includes? excerpt "[truncated]")
-            :new-handles (vec new-handles)}))))
+            :hidden-count-positive? (pos? (count hidden-new))
+            :hidden-omitted? (every? #(not (str/includes? excerpt %))
+                                     hidden-new)
+            :marked? (str/includes? excerpt "[truncated]")}))))
 
 (deftest invalid-candidate-does-not-expose-or-commit-candidate-state
   (let [source "{:a 1}"

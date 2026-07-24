@@ -391,13 +391,13 @@
         candidate        (candidate-document validated
                                              candidate-source
                                              expected-root)
-        candidate-state  (:state (handles/reconcile-candidate-state
-                                  (:state validated)
-                                  candidate-source
-                                  (:edits validated)))
+        candidate-snapshot (handles/reconcile-candidate-state
+                            (:state validated)
+                            (:document validated)
+                            candidate
+                            (:edits validated))
         rendered         (render/render-excerpts
-                          candidate
-                          candidate-state
+                          candidate-snapshot
                           (excerpt-entries candidate
                                            (:changed-ranges mutation)))
         state            (:state rendered)

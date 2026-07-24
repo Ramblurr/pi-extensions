@@ -987,17 +987,35 @@ describe("package", () => {
     }).toEqual({ bounded: true, hasExitCode: true, maximum: 16_384 });
   });
 
-  test("empty malformed extra wrong-version missing and oversized responses are rejected", async () => {
+  test("protocol accepts an exact valid limit and rejects valid JSON one byte over", async () => {
     const run = processRunner();
     expect(typeof run).toBe("function");
     if (!run) return;
     const maximum = extensionModule.MAX_PROTOCOL_BYTES;
+    const emptyEnvelope = {
+      ok: true,
+      protocol_version: 1,
+      result: {},
+      state: { padding: "" },
+    };
+    const emptyJson = JSON.stringify(emptyEnvelope);
+    const paddingLength = maximum - Buffer.byteLength(emptyJson) - 1;
+    const exact =
+      JSON.stringify({
+        ...emptyEnvelope,
+        state: { padding: "x".repeat(paddingLength) },
+      }) + "\n";
+    const oversized = `${exact} `;
+    const accepted = await run(
+      apiWithExec(async () => ({ code: 0, stderr: "", stdout: exact })),
+      { source: "exact-limit" },
+    );
     const outputs = {
       empty: "",
       extra: `${successEnvelope()}\ndebug`,
       malformed: "{",
       missing: JSON.stringify({ ok: true, protocol_version: 1, result: {} }),
-      oversized: "x".repeat(maximum + 1),
+      oversized,
       wrongVersion: JSON.stringify({
         ok: true,
         protocol_version: 2,
@@ -1016,8 +1034,17 @@ describe("package", () => {
         ),
       );
     }
-    expect({ maximum, rejected }).toEqual({
+    expect({
+      accepted: accepted.ok,
+      exactBytes: Buffer.byteLength(exact),
+      maximum,
+      oversizedBytes: Buffer.byteLength(oversized),
+      rejected,
+    }).toEqual({
+      accepted: true,
+      exactBytes: maximum,
       maximum: 16 * 1024 * 1024,
+      oversizedBytes: maximum + 1,
       rejected: {
         empty: true,
         extra: true,
@@ -1906,6 +1933,69 @@ describe("package", () => {
         file: "(old)",
         followupState: observed,
         leftovers: [],
+      });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("oversized edit responses commit neither file bytes nor candidate state", async () => {
+    const run = processRunner();
+    expect(task23Ready() && typeof run === "function").toBe(true);
+    if (!task23Ready() || !run) return;
+    const directory = mkdtempSync(join(tmpdir(), "pi-sexp-edit-"));
+    try {
+      const path = join(directory, "sample.clj");
+      writeFileSync(path, "(old)");
+      const openedState = { observation: "opened" };
+      const requests: Array<Record<string, unknown>> = [];
+      const base = successEnvelope({ candidate: true });
+      const oversized =
+        base +
+        " ".repeat(
+          extensionModule.MAX_PROTOCOL_BYTES + 1 - Buffer.byteLength(base),
+        );
+      const tools = captureRuntimeTools({
+        async invokeBabashka(_pi, request) {
+          const value = request as Record<string, unknown>;
+          requests.push(value);
+          if (value.operation === "read") return readSuccess(openedState);
+          return run(
+            apiWithExec(async () => ({
+              code: 0,
+              stderr: "",
+              stdout: oversized,
+            })),
+            request,
+          );
+        },
+      });
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      await executeReadTool(read, { path }, directory);
+      const error = await caught(() =>
+        executeEditTool(
+          edit,
+          {
+            document: "D1",
+            edits: [{ operation: "delete", target: "§1" }],
+          },
+          directory,
+        ),
+      );
+      await executeReadTool(read, { document: "D1" }, directory);
+      const followup = requests.at(-1)?.request as Record<string, unknown>;
+      expect({
+        file: readFileSync(path, "utf8"),
+        followupState: followup.state,
+        message: error?.message,
+        responseBytes: Buffer.byteLength(oversized),
+      }).toEqual({
+        file: "(old)",
+        followupState: openedState,
+        message:
+          "Invalid Babashka protocol response: response exceeds 16777216 bytes",
+        responseBytes: extensionModule.MAX_PROTOCOL_BYTES + 1,
       });
     } finally {
       rmSync(directory, { force: true, recursive: true });
@@ -3317,6 +3407,58 @@ describe("package", () => {
     }
   });
 
+  test("fresh Pi registries keep handles stable across opposite read orders", async () => {
+    const { directory, path } = acceptanceFile("02-two-functions.clj");
+    try {
+      const lowTools = captureAcceptanceTools();
+      const lowRead = lowTools.find(({ name }) => name === "sexp_read");
+      const lowOpened = await executeReadTool(
+        lowRead,
+        { path, depth: 0 },
+        directory,
+      );
+      const lowOpeningText = toolText(lowOpened);
+      const lowSecond = handleBefore(lowOpeningText, "(defn second-fn");
+      const lowInspected = await executeReadTool(
+        lowRead,
+        {
+          depth: 20,
+          document: "D1",
+          include_atoms: false,
+          target: lowSecond,
+        },
+        directory,
+      );
+      const lowHandles = {
+        first: handleBefore(lowOpeningText, "(defn first-fn"),
+        second: lowSecond,
+        secondBody: handleBefore(
+          toolText(lowInspected),
+          "(second-body stable)",
+        ),
+      };
+
+      const highTools = captureAcceptanceTools();
+      const highRead = highTools.find(({ name }) => name === "sexp_read");
+      const highOpened = await executeReadTool(
+        highRead,
+        { path, depth: 20, include_atoms: false },
+        directory,
+      );
+      const highText = toolText(highOpened);
+      const highHandles = {
+        first: handleBefore(highText, "(defn first-fn"),
+        second: handleBefore(highText, "(defn second-fn"),
+        secondBody: handleBefore(highText, "(second-body stable)"),
+      };
+      await executeReadTool(highRead, { document: "D1", depth: 0 }, directory);
+
+      expect(lowHandles).toEqual(highHandles);
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
   test("acceptance 1 preserves an untouched nested sibling handle across edits", async () => {
     const { directory, path } = acceptanceFile("01-nested-siblings.clj");
     try {
@@ -3458,7 +3600,7 @@ describe("package", () => {
       const target = handleBefore(toolText(opened), "(target old)");
       const external = original.replace("(target old)", "(target external)");
       writeFileSync(path, external);
-      const error = await caught(() =>
+      const attempt = () =>
         executeEditTool(
           edit,
           {
@@ -3468,12 +3610,36 @@ describe("package", () => {
             ],
           },
           directory,
-        ),
+        );
+      const firstError = await caught(attempt);
+      const secondError = await caught(attempt);
+      const replacementPattern =
+        /Replacement handle shown for retry: (§[0-9a-z]+)\./;
+      const replacement = firstError?.message.match(replacementPattern)?.[1];
+      const repeatedReplacement =
+        secondError?.message.match(replacementPattern)?.[1];
+      const refreshed = await executeReadTool(
+        read,
+        { document: "D1", target: replacement ?? "" },
+        directory,
       );
       expect({
-        code: (error as Error & { code?: string })?.code,
+        code: (firstError as Error & { code?: string })?.code,
+        repeatedCode: (secondError as Error & { code?: string })?.code,
+        repeatedReplacement,
+        replacement,
+        replacementIsReadable: toolText(refreshed).includes(
+          `target: ${replacement}`,
+        ),
         source: readFileSync(path, "utf8"),
-      }).toEqual({ code: "changed", source: external });
+      }).toEqual({
+        code: "changed",
+        repeatedCode: "changed",
+        repeatedReplacement: replacement,
+        replacement,
+        replacementIsReadable: true,
+        source: external,
+      });
     } finally {
       rmSync(directory, { force: true, recursive: true });
     }

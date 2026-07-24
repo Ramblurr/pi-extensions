@@ -220,11 +220,18 @@ edit.
 
 **Handle**
 : An opaque, document-scoped ID such as `§h`. Handles are allocated
-  monotonically and are not derived directly from source hashes or positions.
+  monotonically for every structural occurrence during snapshot preparation;
+  they are not derived directly from source hashes or positions.
 
 **Active handle**
 : A handle that reconciles to exactly one current node whose concrete subtree is
-  unchanged from the version represented by the handle.
+  unchanged from the version represented by the handle. Active handles may be
+  hidden internal state or advertised public references.
+
+**Advertised handle**
+: An active handle whose annotation has appeared in tool output. Only advertised
+  handles are valid read or edit targets; guessing a hidden active ID returns
+  `unknown`.
 
 **Retired handle**
 : A handle that changed, was deleted, became ambiguous, or was explicitly
@@ -313,37 +320,47 @@ The result intentionally contains no file hash or revision.
 - The marker is the single `§` character followed by a lowercase base-36 ID.
 - Marker syntax must live behind one shared constant.
 - Annotations are presentation metadata and are never written into the file.
-- Compound nodes and reader nodes receive visible handles by default.
-- Symbols, keywords, strings, characters, booleans, nil, and numbers receive
-  handles only when `include_atoms` is true.
-- Comments, whitespace, commas, and line breaks never receive handles.
+- Snapshot preparation allocates handles for every compound, reader, and atomic
+  structural occurrence in canonical breadth-first order: all top-level forms
+  first, then descendants by absolute structural depth and source order.
+- Compound nodes and reader nodes display handle annotations by default.
+- Symbols, keywords, strings, characters, booleans, nil, and numbers display
+  handle annotations only when `include_atoms` is true.
+- Comments, whitespace, commas, and line breaks are not structural occurrences
+  and never receive handles.
 - Atomic forms still render when `include_atoms` is false; they simply lack
   annotations.
 - `depth: 0` renders a compact summary of each selected root. Every collapsed
-  node needed for later inspection must retain a visible handle.
-- Increasing depth expands structural descendants. It does not change source.
-- Only handles actually included in tool output are considered advertised to the
-  agent.
+  node needed for later inspection retains a visible handle.
+- Increasing depth expands structural descendants. It does not change source or
+  allocation.
+- Only handles actually included in tool output are advertised to the agent.
+  Internally allocated hidden handles cannot be used as read or edit targets.
+- `created_handles` follows first annotation appearance in the returned text; it
+  includes only false-to-true advertisement transitions, not every visible ID.
 - Truncate output at Pi's standard 2,000-line or 50-KB limit and clearly report
   that truncation occurred.
 
 `§` is legal inside a Clojure symbol. Do not reject arbitrary symbols merely
 because they contain `§`. During edit validation, reject only a symbol token that
-exactly equals an active handle issued by the current document. This catches a
-copied annotation without banning legitimate project symbols such as
+exactly equals an advertised handle issued by the current document. This catches
+a copied annotation without banning legitimate project symbols such as
 `price§bucket`.
 
 #### Read-time reconciliation
 
 Opening an already-known canonical path or reading an existing document must
 parse the latest source and reconcile it with the stored snapshot. A changed
-root does not create a new document ID.
+root does not create a new document ID. After reconciliation, snapshot
+preparation allocates any missing structural handles in canonical breadth-first
+order before rendering.
 
 A successful read may:
 
 - preserve handles for unchanged, uniquely mapped nodes;
 - retire changed, deleted, or ambiguous handles;
-- allocate handles for newly displayed nodes;
+- allocate hidden handles for every newly observed structural occurrence;
+- advertise the handles newly displayed by this result;
 - update the document's observed snapshot without modifying the file.
 
 If current source does not parse, return a parse error, modify no file, and keep
@@ -394,15 +411,18 @@ For every call:
 1. Resolve the document record and canonical path.
 2. Read and parse the latest source.
 3. Reconcile the stored tree with the latest tree.
-4. Resolve every requested handle against that same reconciled pre-edit tree.
-5. Validate and, when allowed, repair every `new_form`.
-6. Reject the complete batch if any target or operation conflicts.
-7. Apply all operations structurally with rewrite-clj.
-8. Reparse the complete candidate source.
-9. Produce a unified diff from the latest pre-edit source to the candidate.
-10. Atomically replace the file.
-11. Rebuild hashes, allocate replacement handles, and commit the new document
-    snapshot only after the file write succeeds.
+4. Preallocate missing current-tree handles in canonical breadth-first order.
+5. Resolve every requested advertised handle against that same reconciled
+   pre-edit tree.
+6. Validate and, when allowed, repair every `new_form`.
+7. Reject the complete batch if any target or operation conflicts.
+8. Apply all operations structurally with rewrite-clj.
+9. Reparse the complete candidate source.
+10. Reconcile the pre-edit and candidate trees under explicit mutation semantics.
+11. Preallocate every missing candidate-tree handle before rendering excerpts.
+12. Produce a unified diff from the latest pre-edit source to the candidate.
+13. Atomically replace the file.
+14. Commit the prepared candidate snapshot only after the file write succeeds.
 
 All targets are resolved before any operation is applied. An earlier edit cannot
 move the location used to resolve a later target.
@@ -427,14 +447,14 @@ The exact handles above are illustrative. Return:
 - the number of applied operations;
 - repairs applied to model input;
 - advertised handles retired by reconciliation or mutation;
-- handles created for replacements, insertions, and changed displayed
-  ancestors;
+- `created_handles` for first-time advertisements in result excerpts, not hidden
+  internal allocations;
 - a unified diff containing only the extension's edit against the latest source;
 - compact annotated excerpts that let the agent continue editing.
 
 Do not flood output with hidden internal handles. Report all affected handles
-that were previously advertised, all new handles shown in the excerpt, and
-counts for any omitted internal changes.
+that were previously advertised, all handles first advertised in the excerpt,
+and counts for any omitted internal changes.
 
 #### Edit errors
 
@@ -460,6 +480,9 @@ Return structured error details with:
 - a refreshed excerpt and replacement handle when a changed logical container
   was reconciled confidently enough to display, but never silently retarget the
   failed edit.
+- repeat failures follow only that same replacement handle through uniquely
+  reconciled path shifts; if the replacement changes or disappears, omit
+  replacement context rather than naming the new occupant of its old path.
 
 Successful observation of external source may update the in-memory reconciled
 snapshot even when the requested mutation conflicts. Candidate mutation state
@@ -476,7 +499,8 @@ handle was issued or last preserved.
 Required lifecycle rules:
 
 - Unchanged, uniquely reconciled nodes retain their handles.
-- A changed node retires its old handle and receives a new handle if displayed.
+- A changed node retires its old handle; snapshot preparation allocates the new
+  occurrence, and rendering advertises it only when displayed.
 - Replacing a target always retires the target handle, even when replacement
   produces exactly one form.
 - Deleting a target retires the target and every issued descendant handle.
@@ -596,17 +620,21 @@ The Babashka side should return opaque JSON state containing at least:
                   :concrete-hash "..."
                   :advertised? true
                   :status :active}}
- :retired-handles {"§3" {:reason :changed}}}
+ :retired-handles {"§3" {:reason :changed
+                          :replacement-handle "§k"}}}
 ```
 
 Field names may differ, but the semantics may not. Because Babashka processes
 are short-lived, the state must contain enough data to reparse the old snapshot
-and reattach issued handles. Do not attempt to retain rewrite-clj zipper objects
-across processes.
+and reattach every active handle, including hidden preallocated handles. Do not
+attempt to retain rewrite-clj zipper objects across processes.
 
-Keeping the exact baseline source plus a compact handle manifest is the
+Keeping the exact baseline source plus a complete handle manifest is the
 recommended first implementation. The TypeScript layer treats this state as
 validated opaque data.
+A retired changed target may record the exact replacement handle after that
+replacement is first shown in an error. This optional lineage follows handle
+identity, not a stale path; it cannot authorize an unproven successor.
 
 ### Reconciliation procedure
 
@@ -619,8 +647,9 @@ validated opaque data.
 5. If a paired container differs, align its ordered structural child sequences.
 6. Recurse only through child pairs whose occurrence correspondence is unique.
 7. Produce exactly one of `preserved`, `changed`, `deleted`, or `ambiguous` for
-   every issued active handle affected by the comparison.
-8. Allocate no new public handles until a node is rendered in a result.
+   every active handle affected by the comparison.
+8. Allocate all missing current occurrences in canonical breadth-first order.
+9. Keep those allocations hidden until rendering advertises them.
 
 Use these sources of matching evidence, from strongest to weaker:
 
@@ -814,8 +843,8 @@ For each `new_form`:
 4. If parsing fails because of a missing, extra, or mismatched delimiter, call
    `borkdude.parmezan/parmezan` on the exact supplied text.
 5. Parse the repaired result again as one or more complete forms.
-6. Reject any parsed symbol token that exactly equals an active handle in the
-   current document.
+6. Reject any parsed symbol token that exactly equals an advertised active
+   handle in the current document.
 7. Apply local indentation after repair and before insertion.
 8. After all operations, parse the complete candidate file again.
 
@@ -937,10 +966,38 @@ or:
 ```
 
 Validate both envelopes in TypeScript. Reject malformed JSON, extra stdout,
-missing fields, protocol version mismatches, and oversized responses.
+missing fields, protocol version mismatches, and complete stdout responses over
+16 MiB. A valid JSON response of exactly 16 MiB is accepted; one byte more is
+rejected. The cap covers the full envelope, including opaque preallocated state
+and its trailing newline. A response rejected at this boundary cannot commit a
+read observation or reach the edit file-write step.
 
 Use `cheshire.core`, available in Babashka, for JSON. Include a protocol version
 in requests and responses so incompatible package components fail clearly.
+
+#### Preallocation performance evidence
+
+Production measurements on Linux 6.18.38, x86-64, and Babashka 1.12.218 used
+10 fresh processes per cell and the complete private response, including state
+and its trailing newline:
+
+| File | Nodes | Depth-0 p95 | Depth-1 p95 | Depth-2 p95 | Depth-2 response |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `diff.clj` | 926 | 243 ms | 238 ms | 245 ms | 392,364 bytes |
+| `reconcile.clj` | 2,068 | 463 ms | 448 ms | 444 ms | 869,766 bytes |
+
+Every fresh-read p95 remains below the approximately 500 ms target. Over 20
+warm in-process samples, canonical preparation p50/p95 was 7.53/11.81 ms for
+`diff.clj` and 17.88/21.08 ms for `reconcile.clj`; state JSON serialization
+p50/p95 was 7.17/8.01 ms and 16.84/19.21 ms respectively.
+
+For `reconcile.clj`, representative external change and successful insert
+responses were 870,198 and 894,463 bytes. The latter state held 2,076 active
+and 3 retired manifests and remained 15,882,753 bytes below the 16 MiB cap.
+Repeated churn accumulates retired manifests, so the cap remains an operational
+limit rather than a proof that every document history fits. Full commands, raw
+samples, manifest counts, request sizes, and growth measurements are recorded
+in `prompts/004-stable-handle-allocation-production_report.md`.
 
 ## File updates and concurrency scope
 
@@ -1069,7 +1126,10 @@ Cover:
 - one changed sibling preserving an unchanged nested target;
 - changed ancestors retiring while unchanged descendants survive;
 - replacements and deletions retiring old handles;
-- newly inserted nodes receiving new handles only when rendered;
+- newly inserted occurrences receiving canonical hidden handles before rendering;
+- first advertisement, rather than allocation, populating `created_handles`;
+- depth, atom visibility, root selection, view, and exploration order not changing
+  occurrence-to-handle identity;
 - unique insertion before duplicate siblings when sequence evidence is complete;
 - `[A A]` to `[A A A]` producing ambiguity rather than arbitrary matching;
 - duplicate hashes in different named forms mapping under the correct parent;
@@ -1078,8 +1138,10 @@ Cover:
 - safe reorder matching within one parent;
 - no cross-parent global hash guessing;
 - mapping injectivity;
+- hidden handles being invalid public targets;
 - retired handle IDs never being reused;
-- corrupt stored paths or hashes producing internal-state errors.
+- corrupt, incomplete, or mismatched prepared state producing internal-state
+  errors.
 
 Add generative or table-driven sequence tests that enumerate all optimal
 alignments for short duplicate sequences. Assert that a handle is preserved only
@@ -1090,8 +1152,9 @@ when every valid alignment gives it the same destination.
 Cover:
 
 - collapsed top-level rendering and nested inspection;
-- atomic handles being opt-in;
-- exact active annotation rejection without rejecting unrelated `§` symbols;
+- atomic handle annotations being opt-in while atomic allocation is unconditional;
+- exact advertised annotation rejection without rejecting hidden IDs or unrelated
+  `§` symbols;
 - byte-for-byte preservation of unrelated comments and whitespace;
 - reader conditionals, metadata, discard forms, tagged literals, anonymous
   functions, namespaced maps, quoting forms, commas, and auto-resolved keywords;
@@ -1207,8 +1270,9 @@ Version 1 is ready only when:
 | Contract area | Named evidence |
 |---|---|
 | Public handle-only schemas and two-tool surface | Bun tests `registers exactly the two structural tools`, `edit schema exposes no positional or revision preconditions`, and `all public handles use one shared marker pattern` |
+| Canonical preallocation and stable public identity | `pi-sexp-edit.stable-handles-test`, the fresh CLI depth regression, and the opposite-order fresh Pi registry regression |
 | Reconciliation, ambiguity, retirement, and byte preservation | README acceptance tests 1–6 plus `pi-sexp-edit.reconcile-test`, `pi-sexp-edit.handles-test`, and `pi-sexp-edit.edit-test` |
 | Transactions, repair, comments, malformed source, and reload | README acceptance tests 7–11 plus the mixed-validity and malformed-current acceptance tests |
-| Short-lived private Babashka protocol boundary | Bun runner/protocol tests and `pi-sexp-edit.protocol-test` |
+| Short-lived private Babashka protocol boundary | Exact 16 MiB/+1 Bun boundary test, oversized-edit no-commit test, `pi-sexp-edit.protocol-test`, and the production benchmark report |
 | Published runtime contents | `npm pack --dry-run --ignore-scripts` package audit and the release-manifest Bun test |
 | Supported runtime versions | Babashka `1.12.218`, Pi `0.81.1`, and the combined `bun run test` suite |

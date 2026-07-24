@@ -380,7 +380,7 @@ const pathReadSchema = Type.Object(
     include_atoms: Type.Optional(
       Type.Boolean({
         default: false,
-        description: "Allocate visible handles for atomic forms",
+        description: "Show handle annotations for atomic forms",
       }),
     ),
   },
@@ -401,7 +401,7 @@ const documentReadSchema = Type.Object(
     include_atoms: Type.Optional(
       Type.Boolean({
         default: false,
-        description: "Allocate visible handles for atomic forms",
+        description: "Show handle annotations for atomic forms",
       }),
     ),
   },
@@ -412,7 +412,7 @@ const targetReadSchema = Type.Object(
   {
     document: Type.String({ description: "Open document ID", minLength: 1 }),
     target: Type.String({
-      description: "Active immutable handle to inspect",
+      description: "Advertised immutable handle to inspect",
       pattern: HANDLE_PATTERN,
     }),
     depth: Type.Optional(
@@ -426,7 +426,7 @@ const targetReadSchema = Type.Object(
     include_atoms: Type.Optional(
       Type.Boolean({
         default: false,
-        description: "Allocate visible handles for atomic forms",
+        description: "Show handle annotations for atomic forms",
       }),
     ),
   },
@@ -444,7 +444,7 @@ export type SexpReadInput = Static<typeof sexpReadSchema>;
 const formEditSchema = Type.Object(
   {
     target: Type.String({
-      description: "Active immutable target handle",
+      description: "Advertised immutable target handle",
       pattern: HANDLE_PATTERN,
     }),
     operation: StringEnum(
@@ -464,7 +464,7 @@ const formEditSchema = Type.Object(
 const deleteEditSchema = Type.Object(
   {
     target: Type.String({
-      description: "Active immutable target handle",
+      description: "Advertised immutable target handle",
       pattern: HANDLE_PATTERN,
     }),
     operation: StringEnum(["delete"] as const, {

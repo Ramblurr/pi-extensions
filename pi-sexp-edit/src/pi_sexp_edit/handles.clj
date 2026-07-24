@@ -55,15 +55,20 @@
          (assoc :next-handle-id (inc handle-id)))
      handle]))
 
-(defn resolve-handle [state handle]
+(defn resolve-active-handle [state handle]
   (let [manifest (get-in state [:handles handle])]
     (when (and (some? (parse-handle handle))
                (= :active (:status manifest))
                (not (contains? (:retired-handles state) handle)))
       manifest)))
 
+(defn resolve-advertised-handle [state handle]
+  (let [manifest (resolve-active-handle state handle)]
+    (when (:advertised? manifest)
+      manifest)))
+
 (defn advertise-handle [state handle]
-  (if (resolve-handle state handle)
+  (if (resolve-active-handle state handle)
     (assoc-in state [:handles handle :advertised?] true)
     (throw (ex-info "Cannot advertise an unknown or retired handle"
                     {:code :unknown-handle
@@ -74,7 +79,7 @@
     (contains? (:retired-handles state) handle)
     state
 
-    (resolve-handle state handle)
+    (resolve-active-handle state handle)
     (let [manifest (get-in state [:handles handle])]
       (-> state
           (update :handles dissoc handle)
@@ -91,6 +96,8 @@
   #{:advertised? :concrete-hash :handle :node-tag :path :status})
 (def ^:private retired-manifest-keys
   (conj active-manifest-keys :reason))
+(def ^:private retired-lineage-manifest-keys
+  (conj retired-manifest-keys :replacement-handle))
 
 (defn- internal-state-error
   ([reason data]
@@ -149,10 +156,11 @@
 
 (defn- valid-manifest? [handle status manifest]
   (and (map? manifest)
-       (= (if (= :active status)
-            active-manifest-keys
-            retired-manifest-keys)
-          (set (keys manifest)))
+       (contains? (if (= :active status)
+                    #{active-manifest-keys}
+                    #{retired-manifest-keys
+                      retired-lineage-manifest-keys})
+                  (set (keys manifest)))
        (= handle (:handle manifest))
        (= status (:status manifest))
        (boolean? (:advertised? manifest))
@@ -161,7 +169,11 @@
        (re-matches concrete-hash-pattern (:concrete-hash manifest))
        (valid-path? (:path manifest))
        (or (= :active status)
-           (contains? retirement-reasons (:reason manifest)))))
+           (and (contains? retirement-reasons (:reason manifest))
+                (or (not (contains? manifest :replacement-handle))
+                    (and (some? (parse-handle
+                                 (:replacement-handle manifest)))
+                         (not= handle (:replacement-handle manifest))))))))
 
 (defn- validate-manifests! [state field status]
   (doseq [[handle manifest] (get state field)]
@@ -192,6 +204,14 @@
   (when-let [handle (some #(when (contains? (:retired-handles state) %) %)
                           (keys (:handles state)))]
     (throw (internal-state-error :overlapping-handles {:handle handle})))
+  (doseq [[handle manifest] (:retired-handles state)
+          :let [replacement (:replacement-handle manifest)]
+          :when replacement]
+    (when-not (or (contains? (:handles state) replacement)
+                  (contains? (:retired-handles state) replacement))
+      (throw (internal-state-error :invalid-replacement-lineage
+                                   {:handle handle
+                                    :replacement-handle replacement}))))
   (let [next-handle-id (:next-handle-id state)
         issued-ids     (mapv parse-handle
                              (concat (keys (:handles state))
@@ -211,6 +231,123 @@
                                            (sort (remove expected-ids
                                                          actual-ids)))})))))
   state)
+
+(defn- existing-handle-index [document state target-paths]
+  (reduce
+   (fn [handle-by-path [handle manifest]]
+     (let [path  (:path manifest)
+           entry (parse/node-at-path document path)]
+       (cond
+         (not (contains? target-paths path))
+         (throw (internal-state-error :active-path-not-targetable
+                                      {:handle handle :path path}))
+
+         (or (not= (:node-tag manifest) (:tag entry))
+             (not= (:concrete-hash manifest) (:concrete-hash entry)))
+         (throw (internal-state-error :active-manifest-mismatch
+                                      {:handle handle :path path}))
+
+         (contains? handle-by-path path)
+         (throw (internal-state-error :duplicate-active-path
+                                      {:handle handle :path path}))
+
+         :else
+         (assoc handle-by-path path handle))))
+   {}
+   (sort-by (comp parse-handle key) (:handles state))))
+
+(defn prepare-snapshot [document state]
+  (let [state (validate-state! state)]
+    (when-not (= (:document-id state) (:document-id document))
+      (throw (internal-state-error :document-id-mismatch
+                                   {:document-id (:document-id document)
+                                    :state-document-id (:document-id state)})))
+    (when-not (= (:baseline-source state) (:source document))
+      (throw (internal-state-error :baseline-source-mismatch
+                                   {:document-id (:document-id state)})))
+    (let [entries      (parse/canonical-structural-entries document)
+          target-paths (into #{} (map :path) entries)
+          existing     (existing-handle-index document state target-paths)
+          prepared     (reduce
+                        (fn [{:keys [handle-by-path state] :as preparation}
+                             entry]
+                          (if (contains? handle-by-path (:path entry))
+                            preparation
+                            (let [[next-state handle]
+                                  (allocate-handle state entry)]
+                              {:handle-by-path (assoc handle-by-path
+                                                      (:path entry)
+                                                      handle)
+                               :state next-state})))
+                        {:handle-by-path existing :state state}
+                        entries)
+          handle-by-path (:handle-by-path prepared)
+          state          (validate-state! (:state prepared))]
+      (when-not (and (= target-paths (set (keys handle-by-path)))
+                     (= (count entries)
+                        (count handle-by-path)
+                        (count (:handles state))))
+        (throw (internal-state-error :incomplete-preparation
+                                     {:active-count (count (:handles state))
+                                      :entry-count (count entries)
+                                      :index-count (count handle-by-path)})))
+      {:document document
+       :handle-by-path handle-by-path
+       :state state})))
+
+(defn- retired-code [reason]
+  (if (= :replaced reason) :changed reason))
+
+(defn- replacement-details [prepared reconciliation target retired]
+  (let [first-change? (= :changed
+                         (get-in reconciliation [:handle-statuses target]))
+        replacement   (if first-change?
+                        (get (:handle-by-path prepared) (:path retired))
+                        (:replacement-handle retired))
+        manifest      (resolve-active-handle (:state prepared) replacement)]
+    (when (and first-change? (nil? manifest))
+      (throw (internal-state-error :missing-prepared-replacement
+                                   {:path (:path retired)
+                                    :target target})))
+    (when (and manifest
+               (or first-change? (:advertised? manifest)))
+      (let [current-path (:path manifest)
+            state        (cond-> (:state prepared)
+                           first-change?
+                           (assoc-in [:retired-handles
+                                      target
+                                      :replacement-handle]
+                                     replacement)
+
+                           (not (:advertised? manifest))
+                           (advertise-handle replacement))
+            state        (validate-state! state)]
+        {:entry (parse/node-at-path (:document prepared) current-path)
+         :handle replacement
+         :prepared (assoc prepared :state state)}))))
+
+(defn resolve-public-target [prepared reconciliation target]
+  (let [state    (:state prepared)
+        manifest (resolve-advertised-handle state target)]
+    (if manifest
+      {:entry (parse/node-at-path (:document prepared) (:path manifest))
+       :manifest manifest
+       :prepared prepared}
+      (if-let [retired (let [retired (get-in state [:retired-handles target])]
+                         (when (:advertised? retired) retired))]
+        (let [code        (retired-code (:reason retired))
+              replacement (when (= :changed code)
+                            (replacement-details prepared
+                                                 reconciliation
+                                                 target
+                                                 retired))]
+          (cond-> {:error {:code code :target target}
+                   :prepared (or (:prepared replacement) prepared)}
+            replacement
+            (assoc :replacement-entry (:entry replacement)
+                   :replacement-handle (:handle replacement))))
+        {:error {:code :unknown :target target}
+         :prepared prepared}))))
 
 (defn state->json [state]
   (json/generate-string (validate-state! state)))
@@ -319,7 +456,15 @@
                        :concrete-hash (:concrete-hash current-entry)
                        :node-tag (:tag current-entry)
                        :path (:path current-entry))))
-    (retire-handle state handle status)))
+    (let [current-path (when (= :changed status)
+                         (get-in reconciliation
+                                 [:pairs
+                                  (get-in state [:handles handle :path])
+                                  :current-path]))
+          state        (cond-> state
+                         current-path
+                         (assoc-in [:handles handle :path] current-path))]
+      (retire-handle state handle status))))
 
 (defn- transitioned-state [state current-document reconciliation]
   (-> (reduce (fn [next-state handle-status]
@@ -341,20 +486,33 @@
                                    {:document-id (:document-id state)}
                                    exception)))))
 
+(defn- reconcile-documents [state baseline-document current-document]
+  (let [state       (validate-state! state)
+        document-id (:document-id state)]
+    (when-not (and (= document-id (:document-id baseline-document))
+                   (= document-id (:document-id current-document)))
+      (throw (internal-state-error :document-id-mismatch
+                                   {:document-id document-id})))
+    (when-not (= (:baseline-source state) (:source baseline-document))
+      (throw (internal-state-error :baseline-source-mismatch
+                                   {:document-id document-id})))
+    (let [reconciliation (reconcile/reconcile baseline-document
+                                              current-document
+                                              (:handles state))]
+      (validate-reconciliation! state current-document reconciliation)
+      {:document       current-document
+       :reconciliation reconciliation
+       :state          (transitioned-state state
+                                           current-document
+                                           reconciliation)})))
+
 (defn reconcile-state [state current-source]
   (let [state             (validate-state! state)
         document-id       (:document-id state)
         baseline-document (parsed-baseline state)
         current-document  (parse/parse-source current-source
-                                              {:document-id document-id})
-        reconciliation    (reconcile/reconcile baseline-document
-                                               current-document
-                                               (:handles state))]
-    (validate-reconciliation! state current-document reconciliation)
-    {:reconciliation reconciliation
-     :state          (transitioned-state state
-                                         current-document
-                                         reconciliation)}))
+                                              {:document-id document-id})]
+    (reconcile-documents state baseline-document current-document)))
 
 (defn- path-prefix? [ancestor descendant]
   (and (<= (count ancestor) (count descendant))
@@ -379,7 +537,7 @@
 
 (defn- force-retirement [state handle reason]
   (cond
-    (resolve-handle state handle)
+    (resolve-active-handle state handle)
     (retire-handle state handle reason)
 
     (contains? (:retired-handles state) handle)
@@ -471,18 +629,16 @@
    (:handles observed-state)))
 
 (defn reconcile-candidate-state
-  "Reconciles `state` to `candidate-source` and applies explicit edit retirement.
+  "Reconciles a parsed observed snapshot to parsed `candidate`.
 
-  Reconciliation allocates no handles. Controlled path shifts preserve exact
-  unaffected occurrences even among duplicates. Replacement targets retire even
-  when the candidate subtree is concrete-equal; deletion also retires issued
-  descendants."
-  [observed-state candidate-source edits]
-  (let [{:keys [reconciliation state] :as reconciled}
-        (reconcile-state observed-state candidate-source)
-        candidate (parse/parse-source
-                   candidate-source
-                   {:document-id (:document-id observed-state)})
+  Controlled path shifts preserve exact unaffected occurrences even among
+  duplicates. Replacement targets retire even when the candidate subtree is
+  concrete-equal; deletion also retires issued descendants. The returned
+  candidate snapshot is fully prepared before excerpt rendering."
+  [observed-state observed-document candidate edits]
+  (let [{:keys [state]} (reconcile-documents observed-state
+                                             observed-document
+                                             candidate)
         deterministic-state (preserve-deterministic-occurrences
                              observed-state
                              state
@@ -494,6 +650,4 @@
                     deterministic-state
                     (explicit-retirements observed-state edits))
             validate-state!)]
-    (assoc reconciled
-           :reconciliation reconciliation
-           :state candidate-state)))
+    (prepare-snapshot candidate candidate-state)))

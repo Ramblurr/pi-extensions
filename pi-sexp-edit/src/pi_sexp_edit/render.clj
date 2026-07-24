@@ -164,15 +164,6 @@
         :vector "[...]"
         (wrapper-summary context entry)))))
 
-(defn- existing-handle [state entry]
-  (some (fn [[handle manifest]]
-          (when (and (= (:path entry) (:path manifest))
-                     (= (:tag entry) (:node-tag manifest))
-                     (= (:concrete-hash entry) (:concrete-hash manifest))
-                     (handles/resolve-handle state handle))
-            handle))
-        (sort-by key (:handles state))))
-
 (defn- record-shown-handle [rendering handle]
   (update rendering
           :shown-handles
@@ -181,19 +172,20 @@
 (defn- handle-for-entry [context rendering entry]
   (if (and (atom-entry? entry) (not (:include-atoms? context)))
     [rendering nil]
-    (if-let [handle (existing-handle (:state rendering) entry)]
-      [(-> rendering
-           (assoc :state
-                  (handles/advertise-handle (:state rendering) handle))
-           (record-shown-handle handle))
-       handle]
-      (let [[allocated handle] (handles/allocate-handle (:state rendering)
-                                                        entry)
-            advertised        (handles/advertise-handle allocated handle)]
-        [(-> rendering
-             (assoc :state advertised)
-             (update :created-handles conj handle)
-             (record-shown-handle handle))
+    (let [handle (get (:handle-by-path context) (:path entry))
+          manifest (handles/resolve-active-handle (:state rendering) handle)]
+      (when-not manifest
+        (throw (ex-info "Prepared snapshot omitted a rendered entry"
+                        {:code :internal-state-error
+                         :path (:path entry)
+                         :reason :unprepared-render-entry})))
+      (let [advertised? (:advertised? manifest)
+            state       (handles/advertise-handle (:state rendering) handle)]
+        [(cond-> (-> rendering
+                     (assoc :state state)
+                     (record-shown-handle handle))
+           (not advertised?)
+           (update :created-handles conj handle))
          handle]))))
 
 (defn- render-expanded [context rendering entry depth]
@@ -240,20 +232,22 @@
         (recur (next entries) next-rendering (conj texts text)))
       [rendering (str/join "\n" texts)])))
 
-(defn- context [document include-atoms?]
-  {:children-by-concrete-path (children-by-concrete-path document)
-   :document                  document
-   :include-atoms?            include-atoms?})
+(defn- context [prepared include-atoms?]
+  (let [document (:document prepared)]
+    {:children-by-concrete-path (children-by-concrete-path document)
+     :document                  document
+     :handle-by-path            (:handle-by-path prepared)
+     :include-atoms?            include-atoms?}))
 
-(defn- result [document rendering header body]
+(defn- result [prepared rendering header body]
   {:created-handles (:created-handles rendering)
    :shown-handles   (:shown-handles rendering)
-   :source          (:source document)
+   :source          (get-in prepared [:document :source])
    :state           (:state rendering)
    :text            (str header "\n\n" body)})
 
 (defn render-opening
-  "Renders annotated top-level forms from `document` and updates `state`.
+  "Renders annotated top-level forms from prepared `snapshot`.
 
   Options:
 
@@ -261,23 +255,25 @@
   |-------------------|------------
   | `:depth`          | Descendant expansion depth (default `0`)
   | `:include-atoms?` | Annotate visible atoms (default `false`)"
-  ([document state]
-   (render-opening document state {}))
-  ([document state options]
+  ([snapshot]
+   (render-opening snapshot {}))
+  ([snapshot options]
    (let [{:keys [depth include-atoms?]} (merge opening-defaults options)
-         render-context (context document include-atoms?)
+         document        (:document snapshot)
+         state           (:state snapshot)
+         render-context  (context snapshot include-atoms?)
          [rendering body] (render-entries render-context
                                           state
                                           (parse/structural-children document [])
                                           depth)]
-     (result document
+     (result snapshot
              rendering
              (str "document: " (:document-id state)
                   "\npath: " (:canonical-path state))
              body))))
 
 (defn render-target
-  "Renders one active `target` from `document` and updates `state`.
+  "Renders one resolved `target` from prepared `snapshot`.
 
   Options:
 
@@ -285,33 +281,24 @@
   |-------------------|------------
   | `:depth`          | Descendant expansion depth (default `2`)
   | `:include-atoms?` | Annotate visible atoms (default `false`)"
-  ([document state target]
-   (render-target document state target {}))
-  ([document state target options]
+  ([snapshot target]
+   (render-target snapshot target {}))
+  ([snapshot {:keys [entry handle]} options]
    (let [{:keys [depth include-atoms?]} (merge target-defaults options)
-         manifest (handles/resolve-handle state target)
-         entry    (when manifest
-                    (parse/node-at-path document (:path manifest)))]
-     (when-not entry
-       (throw (ex-info "Cannot render an unknown or retired target"
-                       {:code :unknown
-                        :target target})))
-     (let [render-context  (context document include-atoms?)
-           [rendering body] (render-entries render-context
-                                            state
-                                            [entry]
-                                            depth)]
-       (result document
-               rendering
-               (str "document: " (:document-id state)
-                    "\ntarget: " target)
-               body)))))
+         state           (:state snapshot)
+         render-context  (context snapshot include-atoms?)
+         [rendering body] (render-entries render-context state [entry] depth)]
+     (result snapshot
+             rendering
+             (str "document: " (:document-id state)
+                  "\ntarget: " handle)
+             body))))
 
 (defn render-excerpts
-  "Renders compact annotated `entries` for edit continuation."
-  [document state entries]
-  (let [[rendering text] (render-entries (context document false)
-                                         state
+  "Renders compact annotated `entries` from prepared `snapshot`."
+  [snapshot entries]
+  (let [[rendering text] (render-entries (context snapshot false)
+                                         (:state snapshot)
                                          entries
                                          2)]
     {:created-handles (:created-handles rendering)
@@ -327,39 +314,70 @@
     (contains? request :include-atoms?)
     (assoc :include-atoms? (:include-atoms? request))))
 
-(defn- observed-state [{:keys [canonical-path document-id source state]}]
+(defn- observed-snapshot
+  [{:keys [canonical-path document-id source state]}]
   (if state
-    (:state (handles/reconcile-state state source))
-    (handles/initial-state document-id canonical-path source)))
+    (let [{:keys [document reconciliation state]}
+          (handles/reconcile-state state source)]
+      (assoc (handles/prepare-snapshot document state)
+             :reconciliation reconciliation))
+    (let [document (parse/parse-source source {:document-id document-id})
+          state    (handles/initial-state document-id
+                                          canonical-path
+                                          source)]
+      (assoc (handles/prepare-snapshot document state)
+             :reconciliation {:handle-statuses {} :pairs {}}))))
 
-(defn- retired-code [reason]
-  (if (= :replaced reason) :changed reason))
+(def ^:private context-preview-characters 256)
 
-(defn- target-error [state target]
-  (when-not (handles/resolve-handle state target)
-    (if-let [retired (get-in state [:retired-handles target])]
-      {:code    (retired-code (:reason retired))
-       :data    {:target target}
-       :message (str "Handle " target " is retired")}
-      {:code    :unknown
-       :data    {:target target}
-       :message (str "Unknown handle " target)})))
+(defn- bounded-context-preview [source]
+  (let [end       (min context-preview-characters (count source))
+        safe-end  (if (and (pos? end)
+                           (Character/isHighSurrogate
+                            (.charAt source (dec end))))
+                    (dec end)
+                    end)
+        truncated? (< safe-end (count source))]
+    (str (subs source 0 safe-end)
+         (when truncated? " … [truncated]"))))
 
-(defn- rendered-read [request document state]
-  (let [options  (request-options request)
-        rendered (if-let [target (:target request)]
-                   (render-target document state target options)
-                   (render-opening document state options))]
-    (protocol/success (select-keys rendered [:created-handles :text])
-                      (:state rendered))))
+(defn- target-error [target resolution]
+  (let [code        (get-in resolution [:error :code])
+        replacement (:replacement-handle resolution)
+        entry       (:replacement-entry resolution)]
+    {:code code
+     :data (cond-> {:target target}
+             replacement
+             (assoc :excerpt (str replacement
+                                  " "
+                                  (bounded-context-preview (:source entry)))
+                    :replacement-handle replacement))
+     :message (if (= :unknown code)
+                (str "Unknown handle " target)
+                (str "Handle " target " is retired"))}))
 
 (defn- successful-read [request]
-  (let [state    (observed-state request)
-        document (parse/parse-source (:source request)
-                                     {:document-id (:document-id state)})]
-    (if-let [error (some->> (:target request) (target-error state))]
-      (protocol/failure error state)
-      (rendered-read request document state))))
+  (let [snapshot (observed-snapshot request)
+        options  (request-options request)]
+    (if-let [target (:target request)]
+      (let [resolution (handles/resolve-public-target
+                        snapshot
+                        (:reconciliation snapshot)
+                        target)
+            snapshot   (:prepared resolution)]
+        (if (:error resolution)
+          (protocol/failure (target-error target resolution)
+                            (:state snapshot))
+          (let [rendered (render-target
+                          snapshot
+                          {:entry (:entry resolution) :handle target}
+                          options)]
+            (protocol/success
+             (select-keys rendered [:created-handles :text])
+             (:state rendered)))))
+      (let [rendered (render-opening snapshot options)]
+        (protocol/success (select-keys rendered [:created-handles :text])
+                          (:state rendered))))))
 
 (defn read-source
   "Reads current source, reconciling an optional prior `:state`.
