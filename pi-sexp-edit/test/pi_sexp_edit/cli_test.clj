@@ -263,3 +263,35 @@
                                    (:err result)
                                    "[invalid-arguments]")
               :out (:out result)})))))
+
+(deftest read-subprocess-renders-defining-form-preview-tiers
+  (let [directory (temporary-directory)]
+    (try
+      (let [source (str "(defn core-name \"Core docs.\" [x] "
+                        "(sentinel-core x))\n"
+                        "(>defn checked-name \"Guard docs.\" [x] "
+                        "[any? => any?] (sentinel-guard x))\n"
+                        "(mu/defn malli-name :- :string "
+                        "[x :- :string] (sentinel-malli x))\n"
+                        "(s/defn schema-name :- s/Str "
+                        "[x :- s/Str] (sentinel-schema x))\n"
+                        "(defendpoint endpoint-name "
+                        "(sentinel-endpoint))\n"
+                        "(wrapper (custom-declaration nested-name "
+                        "(sentinel-nested)))\n")
+            file   (source-file directory "definitions.clj" source)
+            path   (.getCanonicalPath file)
+            result (invoke-cli "read" path)]
+        (is (= {:err  ""
+                :exit 0
+                :out  (str "document: D1\n"
+                           "path: " path "\n\n"
+                           "§1 (defn core-name \"Core docs.\" ...)\n"
+                           "§2 (>defn checked-name \"Guard docs.\" ...)\n"
+                           "§3 (mu/defn malli-name ...)\n"
+                           "§4 (s/defn schema-name ...)\n"
+                           "§5 (defendpoint endpoint-name ...)\n"
+                           "§6 (wrapper (custom-declaration ...) ...)\n")}
+               result)))
+      (finally
+        (delete-tree directory)))))

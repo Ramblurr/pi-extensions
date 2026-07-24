@@ -3,6 +3,7 @@
    [cheshire.core :as json]
    [clojure.string :as str]
    [clojure.test :refer [deftest is]]
+   [pi-sexp-edit.forms :as forms]
    [pi-sexp-edit.handles :as handles]
    [pi-sexp-edit.parse :as parse]
    [pi-sexp-edit.render :as sut]))
@@ -36,7 +37,7 @@
             :text               (str "document: D4\n"
                                      "path: src/example.clj\n\n"
                                      "§1 (ns example.core ...)\n"
-                                     "§2 (defn calculate-total [x] ...)")}
+                                     "§2 (defn calculate-total ...)")}
            {:advertised-handles (advertised-handles (:state result))
             :created-handles    (:created-handles result)
             :source             (:source result)
@@ -202,7 +203,7 @@
             :result-sources   [source source source source]
             :texts            [(str "document: D4\n"
                                     "path: src/example.clj\n\n"
-                                    "§1 (outer ...)")
+                                    "§1 (outer (middle ...) ...)")
                                (str "document: D4\n"
                                     "path: src/example.clj\n\n"
                                     "§1 (outer §2 (middle ...))")
@@ -308,7 +309,7 @@
             :retired-reasons {"§1" :changed}
             :text (str "document: D4\n"
                        "path: src/example.clj\n\n"
-                       "§2 (defn alpha [] ...)")}
+                       "§2 (defn alpha ...)")}
            {:active-handles (advertised-handles state)
             :baseline-source (:baseline-source state)
             :created-handles (get-in refreshed [:result :created-handles])
@@ -333,8 +334,8 @@
             :retired-reasons {"§1" :changed}
             :text (str "document: D4\n"
                        "path: src/example.clj\n\n"
-                       "§3 (defn alpha [] ...)\n"
-                       "§2 (defn beta [] ...)")}
+                       "§3 (defn alpha ...)\n"
+                       "§2 (defn beta ...)")}
            {:active-handles (advertised-handles state)
             :beta-manifest (get-in state [:handles "§2"])
             :created-handles (get-in refreshed [:result :created-handles])
@@ -454,3 +455,227 @@
             "protocol_version" 1
             "state" nil}
            decoded))))
+
+(defn- rendered-opening-text [source]
+  (let [[document state] (document-state source)]
+    (:text (sut/render-opening document state))))
+
+(deftest trusted-forms-without-docstrings-show-names-and-no-body
+  (let [source (str "(defn public-name [x] (sentinel-public x))\n"
+                    "(defn- private-name [x] (sentinel-private x))\n"
+                    "(defmacro macro-name [x] (sentinel-macro x))\n"
+                    "(defmulti multi-name (fn [x] (sentinel-dispatch x)))\n"
+                    "(>defn checked-name [x] [any? => any?] "
+                    "(sentinel-checked x))\n"
+                    "(>defn- private-checked [x] [any? => any?] "
+                    "(sentinel-private-checked x))")
+        text   (rendered-opening-text source)]
+    (is (= {:contains-sentinel? false
+            :text (str "document: D4\n"
+                       "path: src/example.clj\n\n"
+                       "§1 (defn public-name ...)\n"
+                       "§2 (defn- private-name ...)\n"
+                       "§3 (defmacro macro-name ...)\n"
+                       "§4 (defmulti multi-name ...)\n"
+                       "§5 (>defn checked-name ...)\n"
+                       "§6 (>defn- private-checked ...)")}
+           {:contains-sentinel? (str/includes? text "sentinel")
+            :text text}))))
+
+(deftest trusted-exact-forms-preserve-complete-string-docstrings
+  (let [source (str "(defn public-name \"Public docs.\" [x] "
+                    "(sentinel-public x))\n"
+                    "(defn- private-name \"Private docs.\" [x] "
+                    "(sentinel-private x))\n"
+                    "(defmacro macro-name \"Macro docs.\" [x] "
+                    "(sentinel-macro x))\n"
+                    "(defmulti multi-name \"Multi docs.\" "
+                    "(fn [x] (sentinel-dispatch x)))\n"
+                    "(>defn checked-name \"Checked docs.\" [x] "
+                    "[any? => any?] (sentinel-checked x))\n"
+                    "(>defn- private-checked \"Private checked docs.\" [x] "
+                    "[any? => any?] (sentinel-private-checked x))")
+        text   (rendered-opening-text source)]
+    (is (= {:contains-sentinel? false
+            :text (str "document: D4\n"
+                       "path: src/example.clj\n\n"
+                       "§1 (defn public-name \"Public docs.\" ...)\n"
+                       "§2 (defn- private-name \"Private docs.\" ...)\n"
+                       "§3 (defmacro macro-name \"Macro docs.\" ...)\n"
+                       "§4 (defmulti multi-name \"Multi docs.\" ...)\n"
+                       "§5 (>defn checked-name \"Checked docs.\" ...)\n"
+                       "§6 (>defn- private-checked "
+                       "\"Private checked docs.\" ...)")}
+           {:contains-sentinel? (str/includes? text "sentinel")
+            :text text}))))
+
+(deftest multiline-docstrings-remain-complete
+  (let [source (str "(defn documented \"First line.\n\n  More detail.\" "
+                    "[x] (sentinel-core x))\n"
+                    "(>defn checked \"Checks first.\n  Checks second.\" "
+                    "[x] [any? => any?] (sentinel-guardrails x))")
+        text   (rendered-opening-text source)]
+    (is (= (str "document: D4\n"
+                "path: src/example.clj\n\n"
+                "§1 (defn documented \"First line.\n\n"
+                "  More detail.\" ...)\n"
+                "§2 (>defn checked \"Checks first.\n"
+                "  Checks second.\" ...)")
+           text))))
+
+(deftest metadata-bearing-names-preserve-docstring-position
+  (let [source (str "(defn ^:private documented \"Metadata docs.\" "
+                    "[x] (sentinel-documented x))\n"
+                    "(defn ^{:private true} undocumented [x] "
+                    "(sentinel-undocumented x))")]
+    (is (= (str "document: D4\n"
+                "path: src/example.clj\n\n"
+                "§1 (defn ^:private documented \"Metadata docs.\" ...)\n"
+                "§2 (defn ^{:private true} undocumented ...)")
+           (rendered-opening-text source)))))
+
+(deftest non-string-third-children-never-render-as-docstrings
+  (let [source (str "(defn vector-third [x] (sentinel-vector x))\n"
+                    "(defn attr-third {:added \"not-a-docstring\"} "
+                    "[x] (sentinel-attr x))\n"
+                    "(defn arities-third "
+                    "([x] (sentinel-one x)) "
+                    "([x y] (sentinel-two x y)))\n"
+                    "(defmacro macro-third [x] (sentinel-macro x))\n"
+                    "(defmulti dispatch-third "
+                    "(fn [x] (sentinel-dispatch x)))\n"
+                    "(defn regex-third #\"not-a-docstring\" "
+                    "[x] (sentinel-regex x))\n"
+                    "(defn symbol-third alleged-doc "
+                    "[x] (sentinel-symbol x))\n"
+                    "(defn keyword-third :alleged-doc "
+                    "[x] (sentinel-keyword x))")
+        text   (rendered-opening-text source)]
+    (is (= {:contains-sentinel? false
+            :text (str "document: D4\n"
+                       "path: src/example.clj\n\n"
+                       "§1 (defn vector-third ...)\n"
+                       "§2 (defn attr-third ...)\n"
+                       "§3 (defn arities-third ...)\n"
+                       "§4 (defmacro macro-third ...)\n"
+                       "§5 (defmulti dispatch-third ...)\n"
+                       "§6 (defn regex-third ...)\n"
+                       "§7 (defn symbol-third ...)\n"
+                       "§8 (defn keyword-third ...)")}
+           {:contains-sentinel? (str/includes? text "sentinel")
+            :text text}))))
+
+(deftest qualified-definitions-use-conservative-head-and-name-previews
+  (let [source (str "(mu/defn malli-name :- :string "
+                    "[x :- :string] (sentinel-malli x))\n"
+                    "(s/defn schema-name :- s/Str "
+                    "[x :- s/Str] (sentinel-schema x))\n"
+                    "(m/defn- private-name :- :string "
+                    "[x :- :string] (sentinel-private x))\n"
+                    "(mu/defn string-third \"Untrusted docs.\" "
+                    "[x] (sentinel-string x))")]
+    (is (= (str "document: D4\n"
+                "path: src/example.clj\n\n"
+                "§1 (mu/defn malli-name ...)\n"
+                "§2 (s/defn schema-name ...)\n"
+                "§3 (m/defn- private-name ...)\n"
+                "§4 (mu/defn string-third ...)")
+           (rendered-opening-text source)))))
+
+(deftest exact-non-doc-aliases-use-their-canonical-preview
+  (with-redefs [forms/explicit-aliases
+                (assoc forms/explicit-aliases "defsetting" :def)]
+    (is (= (str "document: D4\n"
+                "path: src/example.clj\n\n"
+                "§1 (defsetting setting-name ...)")
+           (rendered-opening-text
+            "(defsetting setting-name (sentinel-setting))")))))
+
+(deftest exact-core-declaration-previews-retain-safe-prefixes
+  (let [source (str "(def setting (sentinel-def))\n"
+                    "(defonce cached (sentinel-once))\n"
+                    "(defmethod render-value :json [value] "
+                    "(sentinel-method value))\n"
+                    "(defprotocol Renderer (render [this]))\n"
+                    "(defrecord RecordName [field-one field-two] "
+                    "Object (toString [this] (sentinel-record)))\n"
+                    "(deftype TypeName [field-one] "
+                    "Object (toString [this] (sentinel-type)))\n"
+                    "(declare first-name second-name)\n"
+                    "(deftest sample-test (sentinel-test))\n"
+                    "(ns example.core)")]
+    (is (= (str "document: D4\n"
+                "path: src/example.clj\n\n"
+                "§1 (def setting ...)\n"
+                "§2 (defonce cached ...)\n"
+                "§3 (defmethod render-value :json [value] ...)\n"
+                "§4 (defprotocol Renderer ...)\n"
+                "§5 (defrecord RecordName [field-one field-two] ...)\n"
+                "§6 (deftype TypeName [field-one] ...)\n"
+                "§7 (declare first-name ...)\n"
+                "§8 (deftest sample-test ...)\n"
+                "§9 (ns example.core ...)")
+           (rendered-opening-text source)))))
+
+(deftest unknown-top-level-and-nested-lists-use-distinct-fallbacks
+  (let [source (str "(defendpoint get-user\n"
+                    "  (sentinel-endpoint-body))\n"
+                    "(wrapper\n"
+                    "  (custom-declaration nested-name\n"
+                    "    (sentinel-nested-body)))\n"
+                    "(configure {:secret (sentinel-compound)\n"
+                    "            :nested [1 2 3]}\n"
+                    "  body)")]
+    (is (= (str "document: D4\n"
+                "path: src/example.clj\n\n"
+                "§1 (defendpoint get-user ...)\n"
+                "§2 (wrapper (custom-declaration ...) ...)\n"
+                "§3 (configure {...} ...)")
+           (rendered-opening-text source)))))
+
+(deftest compound-signature-positions-collapse-unless-the-shape-is-trusted
+  (let [source (str "(defmethod multi-method :kind "
+                    "([x] (sentinel-one x)) "
+                    "([x y] (sentinel-two x y)))\n"
+                    "(defrecord BadRecord "
+                    "(field-list (sentinel-record-fields)) Object)\n"
+                    "(deftype BadType "
+                    "(field-list (sentinel-type-fields)) Object)")
+        text   (rendered-opening-text source)]
+    (is (= {:contains-sentinel? false
+            :text (str "document: D4\n"
+                       "path: src/example.clj\n\n"
+                       "§1 (defmethod multi-method :kind ([...] ...) ...)\n"
+                       "§2 (defrecord BadRecord (field-list ...) ...)\n"
+                       "§3 (deftype BadType (field-list ...) ...)")}
+           {:contains-sentinel? (str/includes? text "sentinel")
+            :text text}))))
+
+(deftest compound-metadata-name-targets-collapse
+  (let [source (str "(defn ^:private "
+                    "(sentinel-name (secret-name-body)) "
+                    "[x] (secret-function-body x))")
+        text   (rendered-opening-text source)]
+    (is (= {:contains-secret-body? false
+            :text (str "document: D4\n"
+                       "path: src/example.clj\n\n"
+                       "§1 (defn ^:private (sentinel-name ...) ...)")}
+           {:contains-secret-body? (str/includes? text "secret")
+            :text text}))))
+
+(deftest metadata-wrapped-vector-signatures-remain-complete
+  (let [source (str "(defmethod render-value :kind "
+                    "^:private [value] (sentinel-method value))\n"
+                    "(defrecord RecordName "
+                    "^{:foo true} [field-one field-two] Object)\n"
+                    "(deftype TypeName "
+                    "^:unsynchronized-mutable [field-one] Object)")]
+    (is (= (str "document: D4\n"
+                "path: src/example.clj\n\n"
+                "§1 (defmethod render-value :kind "
+                "^:private [value] ...)\n"
+                "§2 (defrecord RecordName "
+                "^{:foo true} [field-one field-two] ...)\n"
+                "§3 (deftype TypeName "
+                "^:unsynchronized-mutable [field-one] ...)")
+           (rendered-opening-text source)))))

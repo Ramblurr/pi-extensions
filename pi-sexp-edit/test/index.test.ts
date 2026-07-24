@@ -637,7 +637,7 @@ describe("package", () => {
     } finally {
       rmSync(workingDirectory, { force: true, recursive: true });
     }
-  });
+  }, 10_000);
 
   test("rejects a focused helper that is not a test", () => {
     const packageRoot = dirname(

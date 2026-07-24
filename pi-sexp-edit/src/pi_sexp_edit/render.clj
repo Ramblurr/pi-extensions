@@ -1,9 +1,11 @@
 (ns pi-sexp-edit.render
   (:require
    [clojure.string :as str]
+   [pi-sexp-edit.forms :as forms]
    [pi-sexp-edit.handles :as handles]
    [pi-sexp-edit.parse :as parse]
-   [pi-sexp-edit.protocol :as protocol]))
+   [pi-sexp-edit.protocol :as protocol]
+   [rewrite-clj.node :as node]))
 
 (def ^:private opening-defaults
   {:depth 0
@@ -13,17 +15,23 @@
   {:depth 2
    :include-atoms? false})
 
-(def ^:private list-preview-counts
-  {"def"         2
-   "defmacro"    3
-   "defmethod"   4
-   "defmulti"    2
-   "defn"        3
-   "defonce"     2
-   "defprotocol" 2
-   "defrecord"   3
-   "deftype"     3
-   "ns"          2})
+(def ^:private trusted-docstring-kinds
+  #{:defmacro :defmulti :defn :defn-})
+
+(def ^:private exact-preview-counts
+  {:declare     2
+   :def         2
+   :defmethod   4
+   :defonce     2
+   :defprotocol 2
+   :defrecord   3
+   :deftest     2
+   :deftype     3})
+
+(def ^:private signature-child-indexes
+  #{[:defmethod 3]
+    [:defrecord 2]
+    [:deftype 2]})
 
 (defn- children-by-concrete-path [document]
   (reduce
@@ -63,12 +71,69 @@
 
 (declare collapsed-source render-node)
 
+(defn- atom-entry? [entry]
+  (or (:atom? entry)
+      (= :multi-line (:tag entry))))
+
+(defn- parsed-value? [pred entry]
+  (when entry
+    (try
+      (pred (node/sexpr (:node entry)))
+      (catch Exception _exception
+        false))))
+
+(defn- exact-preview [kind children]
+  (if (contains? trusted-docstring-kinds kind)
+    (cond-> (vec (take 2 children))
+      (parsed-value? string? (nth children 2 nil))
+      (conj (nth children 2)))
+    (take (get exact-preview-counts kind 2) children)))
+
+(defn- preview-spec [entry children]
+  (let [head       (:source (first children))
+        exact-kind (forms/exact-classification head)
+        kind       (or exact-kind (forms/classify head))]
+    (cond
+      exact-kind
+      {:declaration? true
+       :exact?       true
+       :kind         exact-kind
+       :selected     (exact-preview exact-kind children)}
+
+      kind
+      {:declaration? true
+       :kind         kind
+       :selected     (take 2 children)}
+
+      (= :top-level (:role entry))
+      {:selected (take 2 children)}
+
+      :else
+      {:selected (take 1 children)})))
+
+(defn- complete-preview-child? [spec index child]
+  (or (atom-entry? child)
+      (and (:declaration? spec)
+           (= 1 index)
+           (= :meta (:tag child))
+           (parsed-value? symbol? child))
+      (and (:exact? spec)
+           (contains? signature-child-indexes [(:kind spec) index])
+           (parsed-value? vector? child))))
+
+(defn- preview-child-source [context spec index child]
+  (if (complete-preview-child? spec index child)
+    (:source child)
+    (collapsed-source context child)))
+
 (defn- list-summary [context entry]
   (let [children (parse/structural-children (:document context) (:path entry))
-        head     (:source (first children))
-        preview  (take (get list-preview-counts head 1) children)]
+        spec     (preview-spec entry children)
+        preview  (:selected spec)
+        texts    (map-indexed #(preview-child-source context spec %1 %2)
+                              preview)]
     (str "("
-         (str/join " " (map :source preview))
+         (str/join " " texts)
          (when (seq preview) " ")
          "...)")))
 
@@ -80,10 +145,6 @@
                               (:source child)))
                           children)]
     (splice-source (:source entry) children child-texts)))
-
-(defn- atom-entry? [entry]
-  (or (:atom? entry)
-      (= :multi-line (:tag entry))))
 
 (defn- collapsed-source [context entry]
   (let [children (direct-children context entry)]
