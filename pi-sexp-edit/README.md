@@ -88,6 +88,31 @@ public result but omits opaque handle state. `check` parses the complete file
 without repairing or changing it. The CLI does not persist document IDs or
 handles between invocations.
 
+### Depth-zero defining-form previews
+
+At depth zero, each top-level list shows its head and identifying second child.
+The defining-form registry recognizes these exact Clojure heads: `def`, `defn`,
+`defn-`, `defonce`, `defmacro`, `defmethod`, `defmulti`, `defprotocol`,
+`defrecord`, `deftype`, `declare`, and `deftest`. It also recognizes the exact
+Guardrails heads `>defn` and `>defn-`.
+
+Exact `defn`, `defn-`, `defmacro`, and `defmulti` forms include their third
+child only when rewrite-clj parsed it as a string. The Guardrails aliases receive
+the same treatment. Missing docstrings never expose argument vectors, arity
+lists, macro bodies, dispatch functions, regexes, or other third-position forms.
+
+Qualified local names such as Malli's `mu/defn`, Schema's `s/defn`, or any other
+alias ending in `/defn` or `/defn-` receive the conservative head-and-name preview. pi-sexp-edit
+does not trust a qualified library's declaration grammar, even when its third
+child is a string. Unknown top-level lists show two compact children; unknown
+nested lists remain head-only.
+
+To recognize another exact nonstandard head, add one entry to
+`pi-sexp-edit.forms/explicit-aliases` and map it to a canonical kind. That mapping
+asserts that the macro uses the canonical declaration prefix. The classifier is
+purely syntactic: it does not resolve namespace aliases, inspect `:-`, load
+libraries, macroexpand forms, or evaluate source.
+
 ## Testing
 
 Install test dependencies without lifecycle scripts, then run the focused or
@@ -266,8 +291,8 @@ document: D4
 path: src/example.clj
 
 §1 (ns example.core ...)
-§7 (defn calculate-total [x] ...)
-§m (defn report-total [x] ...)
+§7 (defn calculate-total ...)
+§m (defn report-total ...)
 ```
 
 Inspecting `§7` should resemble:
@@ -961,6 +986,7 @@ pi-sexp-edit/
 │       ├── cli.clj
 │       ├── protocol.clj
 │       ├── parse.clj
+│       ├── forms.clj
 │       ├── hashes.clj
 │       ├── reconcile.clj
 │       ├── handles.clj
