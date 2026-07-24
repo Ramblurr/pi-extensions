@@ -151,9 +151,9 @@
              (protocol-request "read" (assoc (read-payload "(ok)")
                                              :extra true))))])))
 
-(deftest logical-conflicts-return-the-reconciled-observation-state
-  (let [baseline "(target)"
-        {:keys [handle state]} (state-with-target baseline baseline)
+(deftest logical-conflicts-return-reconciled-state-and-confident-current-context
+  (let [baseline "(outer (target))"
+        {:keys [handle state]} (state-with-target baseline "(target)")
         response (main/handle-request
                   (protocol-request
                    "edit"
@@ -162,17 +162,104 @@
                     :edits [{:new_form "(replacement)"
                              :operation "replace"
                              :target handle}]
-                    :source "(changed)"
-                    :state state}))]
-    (is (= {:baseline "(changed)"
+                    :source "(outer (changed))"
+                    :state state}))
+        replacement (get-in response [:error :data :replacement-handle])
+        excerpt (get-in response [:error :data :excerpt])
+        retry (main/handle-request
+               (protocol-request
+                "edit"
+                {:canonical-path canonical-path
+                 :document-id document-id
+                 :edits [{:new_form "(replacement)"
+                          :operation "replace"
+                          :target replacement}]
+                 :source "(outer (changed))"
+                 :state (:state response)}))]
+    (is (= {:baseline "(outer (changed))"
             :code :changed
+            :excerpt-has-current? true
+            :excerpt-has-replacement? true
             :ok false
-            :retired-reason :changed}
+            :replacement-active? true
+            :retired-reason :changed
+            :retry-candidate "(outer (replacement))"}
            {:baseline (get-in response [:state :baseline-source])
             :code (get-in response [:error :code])
+            :excerpt-has-current? (str/includes? excerpt "(changed)")
+            :excerpt-has-replacement? (str/includes? excerpt replacement)
             :ok (:ok response)
+            :replacement-active?
+            (some? (handles/resolve-handle (:state response) replacement))
             :retired-reason (get-in response
-                                    [:state :retired-handles handle :reason])}))))
+                                    [:state :retired-handles handle :reason])
+            :retry-candidate (get-in retry [:result :candidate-source])}))))
+
+(deftest stale-retirement-does-not-suggest-a-reused-path
+  (let [baseline "[(outer (target))]"
+        {:keys [handle state]} (state-with-target baseline "(outer (target))")
+        first-conflict (main/handle-request
+                        (protocol-request
+                         "edit"
+                         {:canonical-path canonical-path
+                          :document-id document-id
+                          :edits [{:new_form "(replacement)"
+                                   :operation "replace"
+                                   :target handle}]
+                          :source "[(outer (changed))]"
+                          :state state}))
+        reused-baseline (:state
+                         (handles/reconcile-state (:state first-conflict)
+                                                  "[(other x)]"))
+        stale-conflict (main/handle-request
+                        (protocol-request
+                         "edit"
+                         {:canonical-path canonical-path
+                          :document-id document-id
+                          :edits [{:new_form "(replacement)"
+                                   :operation "replace"
+                                   :target handle}]
+                          :source "[(other y)]"
+                          :state reused-baseline}))]
+    (is (= {:code :changed
+            :data {:target handle}}
+           {:code (get-in stale-conflict [:error :code])
+            :data (get-in stale-conflict [:error :data])}))))
+
+(deftest changed-context-advertises-only-its-visible-bounded-replacement
+  (let [target   "(defn f [] (target))"
+        baseline (str "(before)\n" target)
+        current  (str "(before)\n(defn f [] (changed) "
+                      (str/join " " (repeat 600 "(large descendant)"))
+                      ")")
+        {:keys [handle state]} (state-with-target baseline target)
+        response (main/handle-request
+                  (protocol-request
+                   "edit"
+                   {:canonical-path canonical-path
+                    :document-id document-id
+                    :edits [{:new_form "(replacement)"
+                             :operation "replace"
+                             :target handle}]
+                    :source current
+                    :state state}))
+        excerpt (get-in response [:error :data :excerpt])
+        replacement (get-in response [:error :data :replacement-handle])
+        new-handles (remove #(contains? (:handles state) %)
+                            (keys (get-in response [:state :handles])))]
+    (is (= {:all-new-handles-visible? true
+            :bounded? true
+            :code :changed
+            :marked? true
+            :new-handles [replacement]}
+           {:all-new-handles-visible?
+            (every? #(and (get-in response [:state :handles % :advertised?])
+                          (str/includes? excerpt %))
+                    new-handles)
+            :bounded? (<= (alength (.getBytes excerpt "UTF-8")) 1200)
+            :code (get-in response [:error :code])
+            :marked? (str/includes? excerpt "[truncated]")
+            :new-handles (vec new-handles)}))))
 
 (deftest invalid-candidate-does-not-expose-or-commit-candidate-state
   (let [source "{:a 1}"

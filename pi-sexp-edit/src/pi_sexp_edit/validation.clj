@@ -73,22 +73,61 @@
 (defn- retired-code [reason]
   (if (= :replaced reason) :changed reason))
 
-(defn- target-exception [state target]
+(def ^:private context-preview-characters 256)
+
+(defn- bounded-context-preview [source]
+  (let [end       (min context-preview-characters (count source))
+        safe-end  (if (and (pos? end)
+                           (Character/isHighSurrogate
+                            (.charAt source (dec end))))
+                    (dec end)
+                    end)
+        truncated? (< safe-end (count source))]
+    (str (subs source 0 safe-end)
+         (when truncated? " … [truncated]"))))
+
+(defn- changed-target-context
+  [state document reconciliation target retired]
+  (when (= :changed (get-in reconciliation [:handle-statuses target]))
+    (let [current-path (get-in reconciliation
+                               [:pairs (:path retired) :current-path])
+          current-entry (when current-path
+                          (parse/node-at-path document current-path))]
+      (when (and (seq current-path) current-entry)
+        (let [[allocated replacement-handle]
+              (handles/allocate-handle state current-entry)
+              advertised (handles/advertise-handle allocated
+                                                   replacement-handle)]
+          {:excerpt (str replacement-handle
+                         " "
+                         (bounded-context-preview (:source current-entry)))
+           :replacement-handle replacement-handle
+           :state advertised})))))
+
+(defn- target-exception [state document reconciliation target]
   (if-let [retired (get-in state [:retired-handles target])]
-    (ex-info (str "Handle " target " is retired")
-             {:code   (retired-code (:reason retired))
-              :state  state
-              :target target})
+    (let [code    (retired-code (:reason retired))
+          context (when (= :changed code)
+                    (changed-target-context state
+                                            document
+                                            reconciliation
+                                            target
+                                            retired))]
+      (ex-info (str "Handle " target " is retired")
+               (merge {:code   code
+                       :state  state
+                       :target target}
+                      context)))
     (ex-info (str "Unknown handle " target)
              {:code   :unknown
               :state  state
               :target target})))
 
-(defn- resolve-target [state document edit]
+(defn- resolve-target [state document reconciliation edit]
   (let [target   (:target edit)
         manifest (handles/resolve-handle state target)]
     (when-not manifest
-      (throw (target-exception state target)))
+      (throw (target-exception state document reconciliation target)))
     (let [entry (parse/node-at-path document (:path manifest))]
       (when-not entry
         (throw (ex-info "Active handle path is absent from the pre-edit tree"
@@ -227,7 +266,9 @@
   Every target in `:edits` is resolved before any supplied form is parsed."
   [{:keys [edits source state]}]
   (let [external-changes? (not= source (:baseline-source state))
-        observed-state    (:state (handles/reconcile-state state source))
+        observed          (handles/reconcile-state state source)
+        observed-state    (:state observed)
+        reconciliation    (:reconciliation observed)
         document          (parse/parse-source
                            source
                            {:document-id (:document-id observed-state)})
@@ -237,7 +278,10 @@
                                               %1
                                               %2))
                                vec)
-        resolved-edits    (mapv #(resolve-target observed-state document %)
+        resolved-edits    (mapv #(resolve-target observed-state
+                                                 document
+                                                 reconciliation
+                                                 %)
                                 operations)
         planned-edits     (validate-batch-conflicts! observed-state
                                                      resolved-edits)

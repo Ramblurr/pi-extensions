@@ -1,5 +1,9 @@
 import { StringEnum, Type, type Static } from "@earendil-works/pi-ai";
 import {
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_LINES,
+  formatSize,
+  truncateHead,
   withFileMutationQueue as queueFileMutation,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
@@ -26,7 +30,10 @@ export const HANDLE_PATTERN = `^${HANDLE_MARKER}[0-9a-z]+$`;
 export const BABASHKA_TIMEOUT_MS = 30_000;
 export const MAX_DIAGNOSTIC_BYTES = 16_384;
 export const MAX_PROTOCOL_BYTES = 16 * 1024 * 1024;
-export const BB_CONFIG_PATH = join(dirname(fileURLToPath(import.meta.url)), "bb.edn");
+export const BB_CONFIG_PATH = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "bb.edn",
+);
 
 export type OpaqueState = Record<string, unknown> | null;
 
@@ -50,9 +57,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+function hasExactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+): boolean {
   const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+  return (
+    keys.length === expected.length &&
+    expected.every((key) => Object.hasOwn(value, key))
+  );
 }
 
 function invalidProtocol(reason: string): never {
@@ -61,29 +74,38 @@ function invalidProtocol(reason: string): never {
 
 function validateEnvelope(value: unknown): ProtocolEnvelope {
   if (!isRecord(value)) invalidProtocol("response must be an object");
-  if (value.protocol_version !== 1) invalidProtocol("unsupported protocol version");
-  if (value.ok !== true && value.ok !== false) invalidProtocol("ok must be boolean");
-  if (value.state !== null && !isRecord(value.state)) invalidProtocol("state must be opaque object or null");
+  if (value.protocol_version !== 1)
+    invalidProtocol("unsupported protocol version");
+  if (value.ok !== true && value.ok !== false)
+    invalidProtocol("ok must be boolean");
+  if (value.state !== null && !isRecord(value.state))
+    invalidProtocol("state must be opaque object or null");
 
   if (value.ok === true) {
     if (!hasExactKeys(value, ["ok", "protocol_version", "result", "state"])) {
       invalidProtocol("success envelope fields are not exact");
     }
-    if (!isRecord(value.result)) invalidProtocol("success result must be an object");
+    if (!isRecord(value.result))
+      invalidProtocol("success result must be an object");
     return value as unknown as ProtocolSuccess;
   }
 
   if (!hasExactKeys(value, ["error", "ok", "protocol_version", "state"])) {
     invalidProtocol("failure envelope fields are not exact");
   }
-  if (!isRecord(value.error)) invalidProtocol("failure error must be an object");
+  if (!isRecord(value.error))
+    invalidProtocol("failure error must be an object");
   if (!hasExactKeys(value.error, ["code", "data", "message"])) {
     invalidProtocol("failure error fields are not exact");
   }
-  if (typeof value.error.code !== "string" || typeof value.error.message !== "string") {
+  if (
+    typeof value.error.code !== "string" ||
+    typeof value.error.message !== "string"
+  ) {
     invalidProtocol("failure error code and message must be strings");
   }
-  if (!isRecord(value.error.data)) invalidProtocol("failure error data must be an object");
+  if (!isRecord(value.error.data))
+    invalidProtocol("failure error data must be an object");
   return value as unknown as ProtocolFailure;
 }
 
@@ -107,7 +129,9 @@ function truncateUtf8(value: string, maximumBytes: number): string {
   let end = maximumBytes;
   while (end > 0) {
     try {
-      return new TextDecoder("utf-8", { fatal: true }).decode(encoded.subarray(0, end));
+      return new TextDecoder("utf-8", { fatal: true }).decode(
+        encoded.subarray(0, end),
+      );
     } catch {
       end -= 1;
     }
@@ -133,7 +157,14 @@ export async function invokeBabashka(
 
     const result = await pi.exec(
       "bb",
-      ["--config", BB_CONFIG_PATH, "-m", "pi-sexp-edit.main", "--request", requestPath],
+      [
+        "--config",
+        BB_CONFIG_PATH,
+        "-m",
+        "pi-sexp-edit.main",
+        "--request",
+        requestPath,
+      ],
       { signal, timeout: BABASHKA_TIMEOUT_MS },
     );
     if (result.code !== 0 || result.killed) {
@@ -148,13 +179,20 @@ export async function invokeBabashka(
   }
 }
 
-const supportedExtensions = new Set([".bb", ".clj", ".cljc", ".cljd", ".cljs", ".edn"]);
+const supportedExtensions = new Set([
+  ".bb",
+  ".clj",
+  ".cljc",
+  ".cljd",
+  ".cljs",
+  ".edn",
+]);
 
 export class DocumentRegistryError extends Error {
   readonly code: string;
 
   constructor(code: string, message: string) {
-    super(message);
+    super(`[${code}] ${message}`);
     this.name = "DocumentRegistryError";
     this.code = code;
   }
@@ -173,7 +211,10 @@ function requireSupportedExtension(path: string): void {
   }
 }
 
-export async function canonicalizeDocumentPath(path: string, cwd: string): Promise<string> {
+export async function canonicalizeDocumentPath(
+  path: string,
+  cwd: string,
+): Promise<string> {
   const normalized = normalizeToolPath(path);
   if (normalized.length === 0) {
     throw new DocumentRegistryError("path-not-found", "Document path is empty");
@@ -185,12 +226,18 @@ export async function canonicalizeDocumentPath(path: string, cwd: string): Promi
   try {
     canonical = await realpath(absolute);
   } catch {
-    throw new DocumentRegistryError("path-not-found", `Document path does not exist: ${absolute}`);
+    throw new DocumentRegistryError(
+      "path-not-found",
+      `Document path does not exist: ${absolute}`,
+    );
   }
   requireSupportedExtension(canonical);
   const metadata = await stat(canonical);
   if (!metadata.isFile()) {
-    throw new DocumentRegistryError("path-not-file", `Document path is not a file: ${canonical}`);
+    throw new DocumentRegistryError(
+      "path-not-file",
+      `Document path is not a file: ${canonical}`,
+    );
   }
   return canonical;
 }
@@ -252,7 +299,6 @@ export class DocumentRegistry {
 export function createDocumentRegistry(): DocumentRegistry {
   return new DocumentRegistry();
 }
-
 
 const strictObjectOptions = { additionalProperties: false } as const;
 
@@ -397,6 +443,7 @@ const editDescription =
 
 export interface SexpExtensionDependencies {
   invokeBabashka: typeof invokeBabashka;
+  formatOutput: typeof formatBoundedOutput;
   openFile: typeof openFile;
   readFile(path: string): Promise<Uint8Array>;
   rename(source: string, destination: string): Promise<void>;
@@ -407,19 +454,24 @@ export interface SexpExtensionDependencies {
 
 export class SexpDomainError extends Error {
   readonly code: string;
-  readonly data: Record<string, unknown>;
-  readonly state: OpaqueState;
+  readonly target?: string;
 
-  constructor(error: ProtocolFailure["error"], state: OpaqueState) {
-    super(error.message);
+  constructor(error: ProtocolFailure["error"], _state: OpaqueState) {
+    const formatted = formatToolError(
+      Object.assign(new Error(error.message), {
+        code: error.code,
+        data: error.data,
+      }),
+    );
+    super(formatted.message);
     this.name = "SexpDomainError";
     this.code = error.code;
-    this.data = error.data;
-    this.state = state;
+    this.target = (formatted as Error & { target?: string }).target;
   }
 }
 
 const defaultDependencies: SexpExtensionDependencies = {
+  formatOutput: formatBoundedOutput,
   invokeBabashka,
   openFile,
   readFile: readFileBytes,
@@ -429,7 +481,12 @@ const defaultDependencies: SexpExtensionDependencies = {
   withFileMutationQueue: queueFileMutation,
 };
 
-const observationFailureCodes = new Set(["ambiguous", "changed", "deleted", "unknown"]);
+const observationFailureCodes = new Set([
+  "ambiguous",
+  "changed",
+  "deleted",
+  "unknown",
+]);
 const editObservationFailureCodes = new Set([
   "ambiguous",
   "batch-conflict",
@@ -442,7 +499,9 @@ const editObservationFailureCodes = new Set([
 ]);
 
 function decodeSource(bytes: Uint8Array): string {
-  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+    bytes,
+  );
 }
 
 async function removeTemporaryFile(
@@ -463,7 +522,10 @@ export async function atomicReplaceFile(
   dependencyOverrides: Partial<SexpExtensionDependencies> = {},
 ): Promise<void> {
   const dependencies = { ...defaultDependencies, ...dependencyOverrides };
-  const temporaryPath = join(dirname(path), `.pi-sexp-edit-${randomUUID()}.tmp`);
+  const temporaryPath = join(
+    dirname(path),
+    `.pi-sexp-edit-${randomUUID()}.tmp`,
+  );
   let handle: Awaited<ReturnType<typeof openFile>> | undefined;
   try {
     handle = await dependencies.openFile(temporaryPath, "wx", 0o600);
@@ -479,6 +541,271 @@ export async function atomicReplaceFile(
     } finally {
       await removeTemporaryFile(temporaryPath, dependencies);
     }
+  }
+}
+
+export interface BoundedOutput {
+  fullOutputPath?: string;
+  text: string;
+  truncation: {
+    outputBytes: number;
+    outputLines: number;
+    totalBytes: number;
+    totalLines: number;
+  };
+}
+
+async function writePrivateOutput(output: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "pi-sexp-edit-output-"));
+  try {
+    await chmod(directory, 0o700);
+    const path = join(directory, "full-output.txt");
+    await writeFile(path, output, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    await chmod(path, 0o600);
+    return path;
+  } catch (error) {
+    await rm(directory, { force: true, recursive: true });
+    throw error;
+  }
+}
+
+export async function formatBoundedOutput(
+  output: string,
+): Promise<BoundedOutput> {
+  const truncated = truncateHead(output, {
+    maxBytes: DEFAULT_MAX_BYTES,
+    maxLines: DEFAULT_MAX_LINES,
+  });
+  const truncation = {
+    outputBytes: truncated.outputBytes,
+    outputLines: truncated.outputLines,
+    totalBytes: truncated.totalBytes,
+    totalLines: truncated.totalLines,
+  };
+  if (!truncated.truncated) return { text: output, truncation };
+
+  const fullOutputPath = await writePrivateOutput(output);
+  const notice =
+    `[Output truncated: showing ${truncated.outputLines} of ${truncated.totalLines} lines ` +
+    `(${formatSize(truncated.outputBytes)} of ${formatSize(truncated.totalBytes)}). ` +
+    `Full output: ${fullOutputPath}]`;
+  return {
+    fullOutputPath,
+    text:
+      truncated.content.length > 0 ? `${truncated.content}\n${notice}` : notice,
+    truncation,
+  };
+}
+
+async function discardBoundedOutput(output: BoundedOutput): Promise<void> {
+  if (!output.fullOutputPath) return;
+  try {
+    await rm(dirname(output.fullOutputPath), { force: true, recursive: true });
+  } catch {
+    // Preserve the primary write failure; this artifact contains no opaque state.
+  }
+}
+
+function displayHandles(value: unknown): string {
+  return Array.isArray(value) && value.length > 0 ? value.join(" ") : "none";
+}
+
+function displayJson(value: unknown, fallback: unknown): string {
+  return JSON.stringify(value ?? fallback);
+}
+
+function joinDiffAndExcerpts(diff: string, excerpts: string): string {
+  if (diff.length === 0) return excerpts;
+  if (excerpts.length === 0) return diff;
+  return `${diff}${diff.endsWith("\n") ? "\n" : "\n\n"}${excerpts}`;
+}
+
+export function formatEditOutput(
+  documentId: string,
+  result: Record<string, unknown>,
+): string {
+  const metadata = [
+    `document: ${documentId}`,
+    `external_changes_reconciled: ${String(result["external-changes-reconciled?"] ?? false)}`,
+    `applied_edits: ${String(result["applied-edits"] ?? 0)}`,
+    `repairs: ${displayJson(result.repairs, [])}`,
+    `retired_handles: ${displayHandles(result["retired-handles"])}`,
+    `created_handles: ${displayHandles(result["created-handles"])}`,
+    `omitted_internal_counts: ${displayJson(result["omitted-internal-counts"], {})}`,
+  ].join("\n");
+  const diff = typeof result.diff === "string" ? result.diff : "";
+  const excerpts = typeof result.excerpts === "string" ? result.excerpts : "";
+  const body = joinDiffAndExcerpts(diff, excerpts);
+  return body.length > 0 ? `${metadata}\n\n${body}` : metadata;
+}
+
+function validHandleArray(value: unknown): value is string[] {
+  const pattern = new RegExp(HANDLE_PATTERN);
+  return (
+    Array.isArray(value) &&
+    value.every((handle) => typeof handle === "string" && pattern.test(handle))
+  );
+}
+
+function validateEditResult(
+  result: Record<string, unknown>,
+  edits: SexpEditInput["edits"],
+): Record<string, unknown> {
+  if (
+    !Number.isInteger(result["applied-edits"]) ||
+    result["applied-edits"] !== edits.length
+  ) {
+    invalidProtocol("applied edits must equal the requested edit count");
+  }
+  if (typeof result["external-changes-reconciled?"] !== "boolean") {
+    invalidProtocol("external changes reconciled must be a boolean");
+  }
+  for (const field of [
+    "created-handles",
+    "excerpt-handles",
+    "retired-handles",
+  ]) {
+    if (!validHandleArray(result[field])) {
+      invalidProtocol(`${field} must be an array of canonical handles`);
+    }
+  }
+  if (!Array.isArray(result.repairs)) {
+    invalidProtocol("repairs must be an array");
+  }
+  const repairedEdits = new Set<number>();
+  for (const repair of result.repairs) {
+    if (
+      !isRecord(repair) ||
+      !hasExactKeys(repair, ["after", "before", "edit-index", "target"])
+    ) {
+      invalidProtocol("repair fields must be exact");
+    }
+    const editIndex = repair["edit-index"];
+    if (
+      !Number.isInteger(editIndex) ||
+      (editIndex as number) < 0 ||
+      (editIndex as number) >= edits.length ||
+      repairedEdits.has(editIndex as number)
+    ) {
+      invalidProtocol("repair edit index must be unique and in range");
+    }
+    const edit = edits[editIndex as number];
+    if (
+      !edit ||
+      !("new_form" in edit) ||
+      typeof repair.target !== "string" ||
+      repair.target !== edit.target ||
+      typeof repair.before !== "string" ||
+      repair.before !== edit.new_form ||
+      typeof repair.after !== "string" ||
+      repair.after.trim().length === 0 ||
+      repair.after === repair.before
+    ) {
+      invalidProtocol("repair must match its requested form operation");
+    }
+    repairedEdits.add(editIndex as number);
+  }
+  const omitted = result["omitted-internal-counts"];
+  if (
+    !isRecord(omitted) ||
+    !Object.values(omitted).every(
+      (count) => Number.isInteger(count) && (count as number) >= 0,
+    )
+  ) {
+    invalidProtocol("omitted internal counts must be non-negative integers");
+  }
+  for (const field of ["candidate-source", "diff", "excerpts"]) {
+    if (typeof result[field] !== "string") {
+      invalidProtocol(`${field} must be a string`);
+    }
+  }
+  return result;
+}
+
+const errorExplanations: Record<string, string> = {
+  ambiguous: "The target no longer maps to exactly one unchanged form.",
+  "batch-conflict":
+    "The transactional edit batch contains conflicting targets or boundaries.",
+  changed: "The target changed since its immutable handle was issued.",
+  deleted: "The target was deleted since its immutable handle was issued.",
+  "invalid-candidate":
+    "The complete edited file is not a valid structural candidate.",
+  "invalid-form": "An edit operation or supplied form is invalid.",
+  "repair-failed":
+    "Delimiter repair was unsafe or did not produce valid source.",
+  unknown:
+    "The target handle or document is unknown in this extension instance.",
+  "write-failed":
+    "Atomic file replacement failed; candidate state was not committed.",
+};
+
+export function formatToolError(error: unknown): Error {
+  const value = error as Error & { code?: unknown; data?: unknown };
+  const code = typeof value?.code === "string" ? value.code : "internal-error";
+  if (code === "internal-error") {
+    const message = error instanceof Error ? error.message : String(error);
+    return new Error(truncateUtf8(message, MAX_DIAGNOSTIC_BYTES));
+  }
+  const data = isRecord(value.data) ? value.data : {};
+  const target = typeof data.target === "string" ? data.target : undefined;
+  const targets = Array.isArray(data.targets)
+    ? data.targets
+        .filter((item): item is string => typeof item === "string")
+        .slice(0, 32)
+        .map((item) => truncateUtf8(item, 128))
+    : [];
+  const excerpt =
+    typeof data.excerpt === "string"
+      ? truncateUtf8(data.excerpt, 2_048)
+      : undefined;
+  const replacement =
+    typeof data["replacement-handle"] === "string"
+      ? data["replacement-handle"]
+      : undefined;
+  const parts = [
+    `[${code}]`,
+    errorExplanations[code] ?? "The structural operation failed.",
+    target ? `Target: ${target}.` : undefined,
+    targets.length > 0 ? `Targets: ${targets.join(", ")}.` : undefined,
+    excerpt ? `Current excerpt: ${excerpt}` : undefined,
+    replacement
+      ? `Replacement handle shown for retry: ${replacement}.`
+      : undefined,
+  ].filter((part): part is string => Boolean(part));
+  const formatted = new Error(
+    truncateUtf8(parts.join(" "), MAX_DIAGNOSTIC_BYTES),
+  );
+  Object.assign(formatted, { code, target });
+  return formatted;
+}
+
+function publicUnknownDocument(documentId: string): Error {
+  return formatToolError(
+    Object.assign(new Error("Unknown document"), {
+      code: "unknown",
+      data: { target: documentId },
+    }),
+  );
+}
+
+function getPublicDocument(
+  documents: DocumentRegistry,
+  documentId: string,
+): DocumentRecord {
+  try {
+    return documents.getDocument(documentId);
+  } catch (error) {
+    if (
+      error instanceof DocumentRegistryError &&
+      error.code === "unknown-document"
+    ) {
+      throw publicUnknownDocument(documentId);
+    }
+    throw error;
   }
 }
 
@@ -499,9 +826,10 @@ export function createSexpExtension(
     description: readDescription,
     parameters: sexpReadSchema,
     async execute(_toolCallId, parameters, signal, _onUpdate, context) {
-      const record = "path" in parameters
-        ? await documents.openPath(parameters.path, context.cwd)
-        : documents.getDocument(parameters.document);
+      const record =
+        "path" in parameters
+          ? await documents.openPath(parameters.path, context.cwd)
+          : getPublicDocument(documents, parameters.document);
 
       return record.lock.run(async () => {
         const bytes = await dependencies.readFile(record.canonicalPath);
@@ -523,20 +851,29 @@ export function createSexpExtension(
         );
         if (!envelope.ok) {
           if (observationFailureCodes.has(envelope.error.code)) {
-            if (!isRecord(envelope.state)) invalidProtocol("observation state must be an object");
+            if (!isRecord(envelope.state))
+              invalidProtocol("observation state must be an object");
             record.state = envelope.state;
           }
           throw new SexpDomainError(envelope.error, envelope.state);
         }
-        if (!isRecord(envelope.state)) invalidProtocol("read state must be an object");
+        if (!isRecord(envelope.state))
+          invalidProtocol("read state must be an object");
         if (typeof envelope.result.text !== "string") {
           invalidProtocol("read result text must be a string");
         }
 
         record.state = envelope.state;
+        const output = await dependencies.formatOutput(envelope.result.text);
         return {
-          content: [{ type: "text" as const, text: envelope.result.text }],
-          details: { document: record.documentId },
+          content: [{ type: "text" as const, text: output.text }],
+          details: {
+            document: record.documentId,
+            ...(output.fullOutputPath
+              ? { fullOutputPath: output.fullOutputPath }
+              : {}),
+            truncation: output.truncation,
+          },
         };
       });
     },
@@ -548,12 +885,9 @@ export function createSexpExtension(
     description: editDescription,
     parameters: sexpEditSchema,
     async execute(_toolCallId, parameters, signal) {
-      const record = documents.getDocument(parameters.document);
+      const record = getPublicDocument(documents, parameters.document);
       if (record.state === undefined) {
-        throw new DocumentRegistryError(
-          "unknown-document",
-          `Document has no valid open state: ${parameters.document}`,
-        );
+        throw publicUnknownDocument(parameters.document);
       }
 
       return record.lock.run(() =>
@@ -586,36 +920,43 @@ export function createSexpExtension(
             }
             throw new SexpDomainError(envelope.error, envelope.state);
           }
-          if (!isRecord(envelope.state)) invalidProtocol("edit state must be an object");
-          const candidateSource = envelope.result["candidate-source"];
-          if (typeof candidateSource !== "string") {
-            invalidProtocol("candidate source must be a string");
+          if (!isRecord(envelope.state)) {
+            invalidProtocol("edit state must be an object");
           }
-          const diff = envelope.result.diff;
-          const excerpts = envelope.result.excerpts;
-          if (typeof diff !== "string" || typeof excerpts !== "string") {
-            invalidProtocol("edit diff and excerpts must be strings");
+          const result = validateEditResult(envelope.result, parameters.edits);
+          const candidateSource = result["candidate-source"] as string;
+          const fullOutput = formatEditOutput(record.documentId, result);
+          const output = await dependencies.formatOutput(fullOutput);
+
+          try {
+            await atomicReplaceFile(
+              record.canonicalPath,
+              candidateSource,
+              metadata.mode & 0o7777,
+              dependencies,
+            );
+          } catch (error) {
+            await discardBoundedOutput(output);
+            throw formatToolError(
+              Object.assign(
+                new Error("Atomic file replacement failed", { cause: error }),
+                {
+                  code: "write-failed",
+                  data: { target: parameters.edits[0]?.target },
+                },
+              ),
+            );
           }
-
-          const output = diff.length === 0
-            ? excerpts
-            : excerpts.length === 0
-              ? diff
-              : `${diff}${diff.endsWith("\n") ? "\n" : "\n\n"}${excerpts}`;
-
-          await atomicReplaceFile(
-            record.canonicalPath,
-            candidateSource,
-            metadata.mode & 0o7777,
-            dependencies,
-          );
           record.state = envelope.state;
           return {
-            content: [{
-              type: "text" as const,
-              text: output,
-            }],
-            details: { document: record.documentId },
+            content: [{ type: "text" as const, text: output.text }],
+            details: {
+              document: record.documentId,
+              ...(output.fullOutputPath
+                ? { fullOutputPath: output.fullOutputPath }
+                : {}),
+              truncation: output.truncation,
+            },
           };
         }),
       );

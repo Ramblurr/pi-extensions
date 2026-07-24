@@ -121,12 +121,17 @@
   - Validation: full Clojure suite 182 tests / 508 assertions; Bun 30 tests; real Babashka annotated-read probe, whitespace, and newline checks pass.
   - Review: Pi Link review against `2a4b1c4` found one Critical target-state resurrection path, one Important lossy UTF-8 decode, and one Minor protocol assertion gap; all were fixed tests-first, and follow-up review found no remaining findings.
 - [x] Task 23: Add queued atomic `sexp_edit` file replacement
-  - Commit: `edit: add queued atomic file replacement` (this task's commit)
+  - Commit: `6ed4db7 edit: add queued atomic file replacement`
   - Notes: Added lock-and-mutation-queue edit windows, latest byte-safe source reads, one-batch Babashka transforms, selective observation-state commits, private short-name atomic candidates, permission preservation, and post-rename candidate-state commits.
   - TDD: Initial RED was 5 behavior failures / 0 errors; GREEN is 38 Bun tests / 64 assertions after observation-code, atomic-stage, cleanup, private-mode, ordering, and NAME_MAX review regressions.
   - Validation: full Clojure suite 182 tests / 508 assertions; Bun 38 tests; real read→external-comment→edit probe preserved the external text, mode 0640, extension-only diff, and new §2 handle; whitespace/newline checks pass.
   - Review: Pi Link review against `16c49bf` found one Critical omitted observation-state class, two Important atomic cleanup/name issues, and one Minor temporary-mode exposure; all were fixed tests-first, and follow-up review found no remaining findings.
-- [ ] Task 24: Format bounded results and structured errors
+- [x] Task 24: Format bounded results and structured errors
+  - Commit: `tools: format bounded results and errors` (this task's commit)
+  - Notes: Added deterministic complete edit reports, shared Pi head bounds, disclosed private full-output artifacts, structured bounded errors, strict pre-write metadata/repair validation, public unknown normalization, and confident bounded changed-target replacement context.
+  - TDD: Initial RED was 3 missing-formatter behavior failures plus the old edit-output contract; GREEN is 46 Bun tests / 80 assertions and 184 Clojure tests / 510 assertions after metadata, artifact-ordering, stale-path, bounded-context, repair-binding, and state-less-record regressions.
+  - Validation: full Bun and Clojure suites, focused REPL retry/stale-reuse/600-descendant probes, real Babashka metadata/retry probe, clj-kondo, cljfmt, Prettier, whitespace, and newline checks pass.
+  - Review: Pi Link reviews against `6ed4db7` found pre-write metadata, real producer-shape, public-code, artifact-ordering, stale-path, repair-binding, and hidden-context-handle defects; all were fixed tests-first, and final follow-up found no remaining findings.
 - [ ] Task 25: Harden cancellation, timeout, concurrency, and write failures
 - [ ] Task 26: Add read and reconciliation acceptance workflows
 - [ ] Task 27: Add transaction, repair, comment, and reload acceptance workflows
