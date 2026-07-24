@@ -151,7 +151,7 @@
   - Validation: focused 7/7; Bun 66 tests / 104 assertions; Clojure 184 tests / 510 assertions; clj-kondo, cljfmt, Prettier, whitespace, and newline checks pass.
   - Review: Pi Link review against `ccf344e` found irreparable multi-edit rollback and two exact-report assertion gaps; follow-up's sole remaining partial-state proof gap was fixed by successfully retrying the original first-operation handle after exact rollback.
 - [x] Task 28: Audit packaging, documentation, and the release contract
-  - Commit: `package: finalize pi-sexp-edit release` (this task's commit)
+  - Commit: `99a01f0 package: finalize pi-sexp-edit release`
   - Notes: Marked the first release implemented, added install/requirements/usage/testing/limitations and release-evidence docs, corrected the current project layout, and declared the directly imported Pi AI peer.
   - TDD: RED package-contract regression exposed the missing `@earendil-works/pi-ai` peer and release README sections; GREEN is 67 Bun tests / 105 assertions plus 184 Clojure tests / 510 assertions.
   - Packaging: Babashka 1.12.218; pinned rewrite-clj 1.2.55 and Parmezan `772feae8`; npm dry pack contains exactly 16 runtime files and excludes tests/prompts/temp/state; an extracted clean Pi 0.81.1 smoke registered exactly two tools; all 11 acceptance cases passed against the extracted package.
