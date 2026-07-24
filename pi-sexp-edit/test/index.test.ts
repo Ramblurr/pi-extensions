@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -391,6 +392,93 @@ async function executeEditTool(
   return (await tool.execute("call", parameters, signal, undefined, {
     cwd,
   })) as Record<string, unknown>;
+}
+
+async function acceptanceExec(
+  command: string,
+  args: string[],
+  options: ExecOptions,
+): Promise<ExecResult> {
+  let timedOut = false;
+  const child = Bun.spawn([command, ...args], {
+    env: process.env,
+    signal: options.signal,
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+  const timer = options.timeout
+    ? setTimeout(() => {
+        timedOut = true;
+        child.kill();
+      }, options.timeout)
+    : undefined;
+  try {
+    const [code, stderr, stdout] = await Promise.all([
+      child.exited,
+      new Response(child.stderr).text(),
+      new Response(child.stdout).text(),
+    ]);
+    return {
+      code,
+      killed: timedOut || options.signal?.aborted === true,
+      stderr,
+      stdout,
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function captureAcceptanceTools(): CapturedTool[] {
+  const factory = runtimeFactory();
+  const run = processRunner();
+  if (!factory || !run) throw new Error("Acceptance runtime is unavailable");
+  const tools: CapturedTool[] = [];
+  factory(
+    {
+      exec: acceptanceExec,
+      registerTool(tool: CapturedTool) {
+        tools.push(tool);
+      },
+    } as unknown as ExtensionAPI,
+    { invokeBabashka: run } as RuntimeDependencies,
+  );
+  return tools;
+}
+
+function acceptanceFile(name: string): { directory: string; path: string } {
+  const directory = mkdtempSync(join(tmpdir(), "pi-sexp-edit-acceptance-"));
+  const path = join(directory, name);
+  copyFileSync(
+    fileURLToPath(new URL(`./fixtures/acceptance/${name}`, import.meta.url)),
+    path,
+  );
+  return { directory, path };
+}
+
+function toolText(result: Record<string, unknown>): string {
+  const content = result.content as Array<{ text?: string }>;
+  return content[0]?.text ?? "";
+}
+
+function handleBefore(text: string, fragment: string, occurrence = 0): string {
+  const escapedFragment = fragment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedMarker = extensionModule.HANDLE_MARKER.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&",
+  );
+  const matches = [
+    ...text.matchAll(
+      new RegExp(`(${escapedMarker}\\S+)\\s+${escapedFragment}`, "g"),
+    ),
+  ];
+  const handle = matches[occurrence]?.[1];
+  if (!handle || !new RegExp(extensionModule.HANDLE_PATTERN).test(handle)) {
+    throw new Error(
+      `Missing adjacent handle for acceptance fragment: ${fragment}`,
+    );
+  }
+  return handle;
 }
 
 function readSuccess(state: unknown, text = "§1 (value)"): unknown {
@@ -3182,6 +3270,283 @@ describe("package", () => {
       expect({ events, file: readFileSync(path, "utf8") }).toEqual({
         events: ["built-in-enter", "built-in-write", "extension-invoke"],
         file: "(new)",
+      });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("acceptance 1 preserves an untouched nested sibling handle across edits", async () => {
+    const { directory, path } = acceptanceFile("01-nested-siblings.clj");
+    try {
+      const tools = captureAcceptanceTools();
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      const opened = await executeReadTool(
+        read,
+        { path, depth: 20 },
+        directory,
+      );
+      const annotated = toolText(opened);
+      const left = handleBefore(annotated, "(left one)");
+      const right = handleBefore(annotated, "(right two)");
+      await executeEditTool(
+        edit,
+        {
+          document: "D1",
+          edits: [
+            { new_form: "(left changed)", operation: "replace", target: left },
+          ],
+        },
+        directory,
+      );
+      await executeEditTool(
+        edit,
+        {
+          document: "D1",
+          edits: [
+            {
+              new_form: "(right changed)",
+              operation: "replace",
+              target: right,
+            },
+          ],
+        },
+        directory,
+      );
+      expect(readFileSync(path, "utf8")).toBe(
+        "#_{:clj-kondo/ignore [:unresolved-symbol]}\n(outer\n (left changed)\n (right changed))\n",
+      );
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("acceptance 2 reconciles an untouched function after external change", async () => {
+    const { directory, path } = acceptanceFile("02-two-functions.clj");
+    try {
+      const original = readFileSync(path, "utf8");
+      const tools = captureAcceptanceTools();
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      const opened = await executeReadTool(
+        read,
+        { path, depth: 20 },
+        directory,
+      );
+      const secondBody = handleBefore(toolText(opened), "(second-body stable)");
+      const external = original.replace(
+        "(first-body old)",
+        "(first-body external)",
+      );
+      writeFileSync(path, external);
+      await executeEditTool(
+        edit,
+        {
+          document: "D1",
+          edits: [
+            {
+              new_form: "(second-body edited)",
+              operation: "replace",
+              target: secondBody,
+            },
+          ],
+        },
+        directory,
+      );
+      expect(readFileSync(path, "utf8")).toBe(
+        external.replace("(second-body stable)", "(second-body edited)"),
+      );
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("acceptance 3 reconciles a unique unchanged sibling inside one function", async () => {
+    const { directory, path } = acceptanceFile("03-unique-siblings.clj");
+    try {
+      const original = readFileSync(path, "utf8");
+      const tools = captureAcceptanceTools();
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      const opened = await executeReadTool(
+        read,
+        { path, depth: 20 },
+        directory,
+      );
+      const right = handleBefore(toolText(opened), "(right-side stable)");
+      const external = original.replace(
+        "(left-side old)",
+        "(left-side external)",
+      );
+      writeFileSync(path, external);
+      await executeEditTool(
+        edit,
+        {
+          document: "D1",
+          edits: [
+            {
+              new_form: "(right-side edited)",
+              operation: "replace",
+              target: right,
+            },
+          ],
+        },
+        directory,
+      );
+      expect(readFileSync(path, "utf8")).toBe(
+        external.replace("(right-side stable)", "(right-side edited)"),
+      );
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("acceptance 4 rejects an externally changed target without writing", async () => {
+    const { directory, path } = acceptanceFile("04-changed-target.clj");
+    try {
+      const original = readFileSync(path, "utf8");
+      const tools = captureAcceptanceTools();
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      const opened = await executeReadTool(
+        read,
+        { path, depth: 20 },
+        directory,
+      );
+      const target = handleBefore(toolText(opened), "(target old)");
+      const external = original.replace("(target old)", "(target external)");
+      writeFileSync(path, external);
+      const error = await caught(() =>
+        executeEditTool(
+          edit,
+          {
+            document: "D1",
+            edits: [
+              { new_form: "(target attempted)", operation: "replace", target },
+            ],
+          },
+          directory,
+        ),
+      );
+      expect({
+        code: (error as Error & { code?: string })?.code,
+        source: readFileSync(path, "utf8"),
+      }).toEqual({ code: "changed", source: external });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("acceptance 5 rejects an ambiguous handle after duplicate insertion", async () => {
+    const { directory, path } = acceptanceFile("05-duplicate-run.clj");
+    try {
+      const original = readFileSync(path, "utf8");
+      const tools = captureAcceptanceTools();
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      const opened = await executeReadTool(
+        read,
+        { path, depth: 20 },
+        directory,
+      );
+      const duplicate = handleBefore(toolText(opened), "(same)");
+      const external = original.replace(
+        " (same)\n (same))",
+        " (same)\n (same)\n (same))",
+      );
+      writeFileSync(path, external);
+      const error = await caught(() =>
+        executeEditTool(
+          edit,
+          {
+            document: "D1",
+            edits: [
+              {
+                new_form: "(different)",
+                operation: "replace",
+                target: duplicate,
+              },
+            ],
+          },
+          directory,
+        ),
+      );
+      expect({
+        code: (error as Error & { code?: string })?.code,
+        source: readFileSync(path, "utf8"),
+      }).toEqual({ code: "ambiguous", source: external });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("acceptance 6 retires target and ancestors but preserves an unchanged sibling", async () => {
+    const { directory, path } = acceptanceFile("06-retirement.clj");
+    try {
+      const original = readFileSync(path, "utf8");
+      const tools = captureAcceptanceTools();
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      const opened = await executeReadTool(
+        read,
+        { path, depth: 20 },
+        directory,
+      );
+      const annotated = toolText(opened);
+      const root = handleBefore(annotated, "(root");
+      const branch = handleBefore(annotated, "(branch");
+      const target = handleBefore(annotated, "(target old)");
+      const survivor = handleBefore(annotated, "(survivor keep)");
+      await executeEditTool(
+        edit,
+        {
+          document: "D1",
+          edits: [
+            { new_form: "(target replaced)", operation: "replace", target },
+          ],
+        },
+        directory,
+      );
+      writeFileSync(path, original);
+      const retirementCodes: Array<string | undefined> = [];
+      for (const retired of [target, branch, root]) {
+        const error = await caught(() =>
+          executeEditTool(
+            edit,
+            {
+              document: "D1",
+              edits: [
+                {
+                  new_form: "(must-not-apply)",
+                  operation: "replace",
+                  target: retired,
+                },
+              ],
+            },
+            directory,
+          ),
+        );
+        retirementCodes.push((error as Error & { code?: string })?.code);
+      }
+      await executeEditTool(
+        edit,
+        {
+          document: "D1",
+          edits: [
+            {
+              new_form: "(survivor edited)",
+              operation: "replace",
+              target: survivor,
+            },
+          ],
+        },
+        directory,
+      );
+      expect({ retirementCodes, source: readFileSync(path, "utf8") }).toEqual({
+        retirementCodes: ["changed", "changed", "changed"],
+        source:
+          "#_{:clj-kondo/ignore [:unresolved-symbol]}\n(root\n (branch\n  (target old)\n  (survivor edited))\n (outside steady))\n",
       });
     } finally {
       rmSync(directory, { force: true, recursive: true });

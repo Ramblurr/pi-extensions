@@ -133,11 +133,16 @@
   - Validation: full Bun and Clojure suites, focused REPL retry/stale-reuse/600-descendant probes, real Babashka metadata/retry probe, clj-kondo, cljfmt, Prettier, whitespace, and newline checks pass.
   - Review: Pi Link reviews against `6ed4db7` found pre-write metadata, real producer-shape, public-code, artifact-ordering, stale-path, repair-binding, and hidden-context-handle defects; all were fixed tests-first, and final follow-up found no remaining findings.
 - [x] Task 25: Harden cancellation, timeout, concurrency, and write failures
-  - Commit: `tools: harden cancellation and concurrency` (this task's commit)
+  - Commit: `24a4722 tools: harden cancellation and concurrency`
   - Notes: Added structured cancellation/timeout boundaries, pre-exec and pre-rename abort checks, request/candidate/output cleanup, lifecycle-correct observation versus candidate commits, and real built-in-write queue serialization.
   - TDD: Initial RED was 4 cancellation/timeout behavior failures; GREEN is 53 Bun tests / 91 assertions after request-setup, post-format observation, and production built-in queue review regressions.
   - Validation: Bun 53 tests, repeated focused cancellation/concurrency tests, full Clojure suite 184 tests / 510 assertions, clj-kondo, cljfmt, Prettier, whitespace, and newline checks pass.
   - Review: Pi Link reviews against `e713da4` found pre-exec timing, post-format cancellation, mocked queue evidence, observation retirement, and non-public import defects; all were fixed tests-first, and final follow-up found no remaining findings.
-- [ ] Task 26: Add read and reconciliation acceptance workflows
+- [x] Task 26: Add read and reconciliation acceptance workflows
+  - Commit: `acceptance: cover handle reconciliation workflows` (this task's commit)
+  - Notes: Added a reusable registered-tool/real-Babashka acceptance harness, six focused fixtures, and README acceptance cases 1–6 for survivor reuse, external reconciliation, conflict safety, ambiguity, and permanent retirement.
+  - TDD: RED was 6 acceptance harness-boundary failures; GREEN is 6/6 focused acceptance cases and 59 Bun tests / 97 assertions.
+  - Validation: full Bun and Clojure suites (184 tests / 510 assertions), repeated focused acceptance runs, REPL fixture parsing, clj-kondo over `src test`, cljfmt, Prettier, whitespace, and newline checks pass.
+  - Review: Pi Link review against `24a4722` found permanent-retirement proof, fixture lint, handle-adjacency, shared-pattern, and focused-external-change gaps; all were fixed, and final follow-up found no remaining findings.
 - [ ] Task 27: Add transaction, repair, comment, and reload acceptance workflows
 - [ ] Task 28: Audit packaging, documentation, and the release contract
