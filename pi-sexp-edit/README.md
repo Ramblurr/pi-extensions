@@ -64,6 +64,30 @@ Use the returned document ID and handles in one transactional `sexp_edit` batch:
 Call `sexp_read` again to refresh or inspect. Do not invent handles or reuse a
 retired handle.
 
+### No-LLM CLI
+
+From the package checkout or extracted package directory, run structural reads
+and syntax checks directly through Babashka:
+
+```bash
+bb sexp read path/to/example.clj
+bb sexp read path/to/example.clj --depth 3 --include-atoms
+bb sexp read path/to/example.clj --depth 3 --format json
+bb sexp check path/to/example.clj
+bb sexp check path/to/example.clj --format json
+```
+
+From another directory, point Babashka at the package configuration:
+
+```bash
+bb --config /absolute/path/to/pi-sexp-edit/bb.edn sexp read path/to/example.clj
+```
+
+`read` prints the same annotated text as `sexp_read`. JSON output includes the
+public result but omits opaque handle state. `check` parses the complete file
+without repairing or changing it. The CLI does not persist document IDs or
+handles between invocations.
+
 ## Testing
 
 Install test dependencies without lifecycle scripts, then run the focused or
@@ -934,6 +958,7 @@ pi-sexp-edit/
 ├── src/
 │   └── pi_sexp_edit/
 │       ├── main.clj
+│       ├── cli.clj
 │       ├── protocol.clj
 │       ├── parse.clj
 │       ├── hashes.clj

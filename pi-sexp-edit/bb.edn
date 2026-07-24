@@ -6,6 +6,8 @@
  :tasks {dev  {:task (shell (str "bb --classpath src"
                                  java.io.File/pathSeparator
                                  "test nrepl-server"))}
+         sexp {:requires ([pi-sexp-edit.cli :as cli])
+               :task     (apply cli/-main *command-line-args*)}
          test {:extra-paths ["test"]
                :requires    ([pi-sexp-edit.test-runner :as test-runner])
                :task        (apply test-runner/-main *command-line-args*)}}}
