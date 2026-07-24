@@ -145,9 +145,15 @@
   - Validation: full Bun and Clojure suites (184 tests / 510 assertions), repeated focused acceptance runs, REPL fixture parsing, clj-kondo over `src test`, cljfmt, Prettier, whitespace, and newline checks pass.
   - Review: Pi Link review against `24a4722` found permanent-retirement proof, fixture lint, handle-adjacency, shared-pattern, and focused-external-change gaps; all were fixed, and final follow-up found no remaining findings.
 - [x] Task 27: Add transaction, repair, comment, and reload acceptance workflows
-  - Commit: `acceptance: cover transactions repair and reload` (this task's commit)
+  - Commit: `b470acf acceptance: cover transactions repair and reload`
   - Notes: Added real-tool acceptance cases 7–11 for transactional batches, reported delimiter repair, irreparable rollback, comment ownership, and reload, plus mixed-validity and malformed-current rollback workflows.
   - TDD: The focused 7-case acceptance suite passed the existing implementation without production changes; review strengthened rollback, exact operation-count, and complete target-bound repair-report assertions.
   - Validation: focused 7/7; Bun 66 tests / 104 assertions; Clojure 184 tests / 510 assertions; clj-kondo, cljfmt, Prettier, whitespace, and newline checks pass.
   - Review: Pi Link review against `ccf344e` found irreparable multi-edit rollback and two exact-report assertion gaps; follow-up's sole remaining partial-state proof gap was fixed by successfully retrying the original first-operation handle after exact rollback.
-- [ ] Task 28: Audit packaging, documentation, and the release contract
+- [x] Task 28: Audit packaging, documentation, and the release contract
+  - Commit: `package: finalize pi-sexp-edit release` (this task's commit)
+  - Notes: Marked the first release implemented, added install/requirements/usage/testing/limitations and release-evidence docs, corrected the current project layout, and declared the directly imported Pi AI peer.
+  - TDD: RED package-contract regression exposed the missing `@earendil-works/pi-ai` peer and release README sections; GREEN is 67 Bun tests / 105 assertions plus 184 Clojure tests / 510 assertions.
+  - Packaging: Babashka 1.12.218; pinned rewrite-clj 1.2.55 and Parmezan `772feae8`; npm dry pack contains exactly 16 runtime files and excludes tests/prompts/temp/state; an extracted clean Pi 0.81.1 smoke registered exactly two tools; all 11 acceptance cases passed against the extracted package.
+  - Validation: `bun run test`, clj-kondo over `src test`, cljfmt, Prettier, dry pack, whitespace, and newline checks pass. Installed Babashka does not expose the planned `bb deps --tree` subcommand, so `bb print-deps --format deps` verified the resolved pins.
+  - Review: Required Task 28 review prompts to `pi-sexp-edit-reviewer` were blocked by its terminal hard ceiling; supplemental Pi Link review found three Minor documentation/contract-test gaps, all fixed, and follow-up found no remaining findings.

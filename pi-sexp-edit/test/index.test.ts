@@ -569,6 +569,47 @@ describe("package", () => {
     expect(typeof extension).toBe("function");
   });
 
+  test("release manifest and README expose the complete runnable package", () => {
+    const packageRoot = dirname(
+      fileURLToPath(new URL("../index.ts", import.meta.url)),
+    );
+    const manifest = JSON.parse(
+      readFileSync(join(packageRoot, "package.json"), "utf8"),
+    ) as Record<string, unknown>;
+    const readme = readFileSync(join(packageRoot, "README.md"), "utf8");
+    const peers = manifest.peerDependencies as Record<string, string>;
+    const scripts = manifest.scripts as Record<string, string>;
+    expect({
+      extensions: (manifest.pi as { extensions?: unknown }).extensions,
+      files: manifest.files,
+      peers: Object.keys(peers).sort(),
+      peerRanges: Object.values(peers),
+      readmeSections: [
+        "Install",
+        "Requirements",
+        "Usage",
+        "Testing",
+        "Limitations",
+      ].every((heading) => readme.includes(`## ${heading}`)),
+      released: readme.includes(
+        "> **Status:** implemented and tested first release.",
+      ),
+      scripts: Object.keys(scripts).sort(),
+    }).toEqual({
+      extensions: ["./index.ts"],
+      files: ["index.ts", "bb.edn", "src/**/*.clj", "README.md", "LICENSE"],
+      peers: [
+        "@earendil-works/pi-ai",
+        "@earendil-works/pi-coding-agent",
+        "typebox",
+      ],
+      peerRanges: ["*", "*", "*"],
+      readmeSections: true,
+      released: true,
+      scripts: ["test", "test:clj", "test:ts"],
+    });
+  });
+
   test("runs Clojure tests outside the package directory", () => {
     const packageRoot = dirname(
       fileURLToPath(new URL("../index.ts", import.meta.url)),

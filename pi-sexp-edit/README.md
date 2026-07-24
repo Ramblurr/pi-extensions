@@ -1,7 +1,6 @@
 # pi-sexp-edit
 
-> **Status:** implementation specification. This directory intentionally contains
-> no implementation yet.
+> **Status:** implemented and tested first release.
 
 `pi-sexp-edit` is a custom Pi extension for reading and editing Clojure forms
 through compact structural handles. An agent selects a form by copying a handle
@@ -14,6 +13,86 @@ Babashka processes. Package-local Clojure code owns parsing, reconciliation,
 validation, delimiter repair, and syntax-preserving edits.
 
 This document is the implementation contract for the first release.
+
+## Install
+
+Review the package before installation: Pi extensions run with full user access.
+Install a local checkout with:
+
+```bash
+pi install /absolute/path/to/pi-sexp-edit
+```
+
+After publication, install the versioned npm package with:
+
+```bash
+pi install npm:@ramblurr/pi-sexp-edit@0.1.0
+```
+
+Use `pi remove npm:@ramblurr/pi-sexp-edit` to remove an npm installation.
+
+## Requirements
+
+- Pi `0.81.1` or a compatible release that exports the coding-agent and AI APIs.
+- Babashka `1.12.218` or newer on `PATH`.
+- Clojure-family files with `.bb`, `.clj`, `.cljc`, `.cljd`, `.cljs`, or `.edn`
+  extensions.
+
+`bb.edn` pins rewrite-clj `1.2.55` and Parmezan commit
+`772feae8ae7fe08cda829033788c677d21599c43`. Babashka resolves these dependencies
+on first use.
+
+## Usage
+
+Open a file with `sexp_read`, then copy handles from its annotated result:
+
+```json
+{"path":"src/example.clj","depth":3}
+```
+
+Use the returned document ID and handles in one transactional `sexp_edit` batch:
+
+```json
+{
+  "document":"D1",
+  "edits":[
+    {"operation":"replace","target":"§2","new_form":"(updated value)"}
+  ]
+}
+```
+
+Call `sexp_read` again to refresh or inspect. Do not invent handles or reuse a
+retired handle.
+
+## Testing
+
+Install test dependencies without lifecycle scripts, then run the focused or
+combined suites:
+
+```bash
+bun install --ignore-scripts
+bb test
+bun test
+bun run test
+```
+
+The release audit uses Babashka `1.12.218`, Bun `1.3.13`, and Pi `0.81.1`.
+
+## Limitations
+
+- Documents and handles live only for the current extension instance; `/reload`
+  or restart requires a new `sexp_read`.
+- The mutation queue coordinates participating tools inside one Pi process,
+  including Pi's built-in `edit` and `write`. Arbitrary external writers and
+  tools that bypass the queue have no cross-process lock or compare-and-swap
+  protection.
+- Version 1 does not preserve moves across parents, evaluate project code, offer
+  `dry_run`, or target comments and whitespace.
+- Truncated results disclose a mode-`0600` full-output file inside a private
+  mode-`0700` temporary directory. These files remain until the caller or the
+  operating system removes them.
+
+See [Non-goals](#non-goals) for the complete scope boundary.
 
 ## Central contract
 
@@ -841,9 +920,9 @@ compare-and-swap protocol. Merkle reconciliation prevents broad stale-target
 rejection; it does not by itself eliminate a writer changing the file during the
 mutation window. Do not describe the tool as solving that separate problem.
 
-## Proposed project layout
+## Project layout
 
-The package should remain self-contained:
+The package is self-contained:
 
 ```text
 pi-sexp-edit/
@@ -861,21 +940,21 @@ pi-sexp-edit/
 │       ├── reconcile.clj
 │       ├── handles.clj
 │       ├── render.clj
+│       ├── diff.clj
 │       ├── edit.clj
 │       ├── repair.clj
 │       └── validation.clj
 └── test/
+    ├── fixtures/
+    │   ├── acceptance/
+    │   └── syntax/
     ├── pi_sexp_edit/
-    │   ├── hashes_test.clj
-    │   ├── reconcile_test.clj
-    │   ├── read_test.clj
-    │   ├── edit_test.clj
-    │   └── repair_test.clj
+    │   ├── *_test.clj
+    │   └── test_runner.clj
     └── index.test.ts
 ```
 
-The implementer may combine small namespaces, but hashing, reconciliation, and
-mutation logic should remain independently testable.
+Hashing, reconciliation, and mutation logic remain independently testable.
 
 ### `package.json`
 
@@ -886,8 +965,8 @@ Declare:
 - MIT license;
 - `pi-package`, `pi-extension`, and `clojure` keywords;
 - `./index.ts` under `pi.extensions`;
-- the Pi coding-agent package as a peer dependency;
-- TypeBox according to the Pi package conventions;
+- the Pi coding-agent and AI packages as peer dependencies;
+- TypeBox as a peer dependency according to Pi package conventions;
 - every `.clj` source file, `bb.edn`, README, and LICENSE in published files;
 - scripts for TypeScript tests, Babashka tests, and the combined suite.
 
@@ -1033,9 +1112,9 @@ Cover:
 11. Restart or reload Pi and confirm that an old document ID fails and a new
     `sexp_read` is required.
 
-## Implementation order
+## Implementation history
 
-A separate implementation agent should proceed in this order:
+The first release was built in this order:
 
 1. Build pure parsing, structural-child enumeration, hashing, and framing.
 2. Build reconciliation with exhaustive duplicate-sequence tests.
@@ -1071,3 +1150,14 @@ Version 1 is ready only when:
 - no MCP, daemon, socket, or network service is introduced;
 - the complete automated test suite passes under the declared Babashka and Pi
   versions.
+
+### Release evidence
+
+| Contract area | Named evidence |
+|---|---|
+| Public handle-only schemas and two-tool surface | Bun tests `registers exactly the two structural tools`, `edit schema exposes no positional or revision preconditions`, and `all public handles use one shared marker pattern` |
+| Reconciliation, ambiguity, retirement, and byte preservation | README acceptance tests 1–6 plus `pi-sexp-edit.reconcile-test`, `pi-sexp-edit.handles-test`, and `pi-sexp-edit.edit-test` |
+| Transactions, repair, comments, malformed source, and reload | README acceptance tests 7–11 plus the mixed-validity and malformed-current acceptance tests |
+| Short-lived private Babashka protocol boundary | Bun runner/protocol tests and `pi-sexp-edit.protocol-test` |
+| Published runtime contents | `npm pack --dry-run --ignore-scripts` package audit and the release-manifest Bun test |
+| Supported runtime versions | Babashka `1.12.218`, Pi `0.81.1`, and the combined `bun run test` suite |
