@@ -33,41 +33,36 @@
     [:defrecord 2]
     [:deftype 2]})
 
-(defn- children-by-concrete-path [document]
-  (reduce
-   (fn [children entry]
-     (let [path (:concrete-path entry)]
-       (if (seq path)
-         (update children (pop path) (fnil conj []) entry)
-         children)))
-   {}
-   (:nodes document)))
-
 (defn- direct-children [context entry]
-  (get (:children-by-concrete-path context) (:concrete-path entry) []))
+  (parse/concrete-children (:document context) (:concrete-path entry)))
 
-(defn- child-offset [source child-source cursor]
-  (or (str/index-of source child-source cursor)
-      (throw (ex-info "Indexed child source is not within its parent"
-                      {:code :internal-state-error
-                       :reason :invalid-concrete-index}))))
+(defn- relative-child-span [entry child cursor]
+  (let [{parent-start :start parent-end :end} (parse/source-span entry)
+        {child-start :start child-end :end} (parse/source-span child)
+        start (- child-start parent-start)
+        end   (- child-end parent-start)]
+    (when-not (and (<= cursor start end)
+                   (<= child-end parent-end))
+      (throw (ex-info "Indexed child span is not within its parent"
+                      {:code   :internal-state-error
+                       :reason :invalid-concrete-index})))
+    [start end]))
 
-(defn- splice-source [source children child-texts]
-  (loop [children children
-         child-texts child-texts
-         chunks []
-         cursor 0]
-    (if-let [child (first children)]
-      (let [child-source (:source child)
-            offset       (child-offset source child-source cursor)
-            next-cursor  (+ offset (count child-source))]
-        (recur (next children)
-               (next child-texts)
-               (conj chunks
-                     (subs source cursor offset)
-                     (first child-texts))
-               next-cursor))
-      (apply str (conj chunks (subs source cursor))))))
+(defn- splice-source [entry children child-texts]
+  (let [source (:source entry)]
+    (loop [children children
+           child-texts child-texts
+           chunks []
+           cursor 0]
+      (if-let [child (first children)]
+        (let [[offset next-cursor] (relative-child-span entry child cursor)]
+          (recur (next children)
+                 (next child-texts)
+                 (conj chunks
+                       (subs source cursor offset)
+                       (first child-texts))
+                 next-cursor))
+        (apply str (conj chunks (subs source cursor)))))))
 
 (declare collapsed-source render-node)
 
@@ -144,7 +139,7 @@
                               (collapsed-source context child)
                               (:source child)))
                           children)]
-    (splice-source (:source entry) children child-texts)))
+    (splice-source entry children child-texts)))
 
 (defn- collapsed-source [context entry]
   (let [children (direct-children context entry)]
@@ -196,13 +191,11 @@
            cursor 0
            rendering rendering]
       (if-let [child (first children)]
-        (let [child-source (:source child)
-              offset       (child-offset source child-source cursor)
-              next-cursor  (+ offset (count child-source))
+        (let [[offset next-cursor] (relative-child-span entry child cursor)
               [next-rendering child-text]
               (if (:structural? child)
                 (render-node context rendering child (dec depth))
-                [rendering child-source])]
+                [rendering (:source child)])]
           (recur (next children)
                  (conj chunks (subs source cursor offset) child-text)
                  next-cursor
@@ -233,11 +226,9 @@
       [rendering (str/join "\n" texts)])))
 
 (defn- context [prepared include-atoms?]
-  (let [document (:document prepared)]
-    {:children-by-concrete-path (children-by-concrete-path document)
-     :document                  document
-     :handle-by-path            (:handle-by-path prepared)
-     :include-atoms?            include-atoms?}))
+  {:document       (:document prepared)
+   :handle-by-path (:handle-by-path prepared)
+   :include-atoms? include-atoms?})
 
 (defn- result [prepared rendering header body]
   {:created-handles (:created-handles rendering)

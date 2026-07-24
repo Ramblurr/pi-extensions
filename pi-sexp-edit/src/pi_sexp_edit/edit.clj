@@ -153,38 +153,6 @@
           (:root document)
           (sort descending-concrete-path groups)))
 
-(defn- line-start-offsets [source]
-  (loop [offset 0
-         starts [0]]
-    (if (>= offset (count source))
-      starts
-      (case (.charAt source offset)
-        \return
-        (let [next-offset (if (and (< (inc offset) (count source))
-                                   (= \newline (.charAt source (inc offset))))
-                            (+ offset 2)
-                            (inc offset))]
-          (recur next-offset (conj starts next-offset)))
-
-        \newline
-        (recur (inc offset) (conj starts (inc offset)))
-
-        (recur (inc offset) starts)))))
-
-(defn- target-span [source starts entry]
-  (let [{:keys [row col end-row end-col]} entry]
-    (when-not (every? some? [row col end-row end-col])
-      (throw (ex-info "Target has no concrete source span"
-                      {:code   :internal-state-error
-                       :reason :missing-target-span})))
-    (let [start (+ (nth starts (dec row)) (dec col))
-          end   (+ (nth starts (dec end-row)) (dec end-col))]
-      (when-not (= (:source entry) (subs source start end))
-        (throw (ex-info "Target span disagrees with the parser index"
-                        {:code   :internal-state-error
-                         :reason :invalid-target-span})))
-      [start end])))
-
 (defn- before-insertion [supplied indentation]
   (when supplied
     (let [source     (:source supplied)
@@ -227,16 +195,14 @@
            (after-insertion after following-source)))))
 
 (defn- target-patches [source groups]
-  (let [starts (line-start-offsets source)]
-    (->> groups
-         (mapv (fn [group]
-                 (let [[start end] (target-span source
-                                                starts
-                                                (:target-entry group))]
-                   {:end         end
-                    :replacement (group-replacement source end group)
-                    :start       start})))
-         (sort-by :start))))
+  (->> groups
+       (mapv (fn [group]
+               (let [{:keys [start end]}
+                     (parse/source-span (:target-entry group))]
+                 {:end         end
+                  :replacement (group-replacement source end group)
+                  :start       start})))
+       (sort-by :start)))
 
 (defn- lexical-boundary-char? [character]
   (or (Character/isWhitespace character)
@@ -336,12 +302,9 @@
     :else 0))
 
 (defn- excerpt-entries [candidate changed-ranges]
-  (let [source  (:source candidate)
-        starts  (line-start-offsets source)
-        entries (mapv (fn [entry]
-                        (let [[start end] (target-span source starts entry)]
-                          {:entry entry
-                           :span  {:end end :start start}}))
+  (let [entries (mapv (fn [entry]
+                        {:entry entry
+                         :span  (parse/source-span entry)})
                       (parse/structural-children candidate []))]
     (->> changed-ranges
          (mapcat (fn [changed-range]

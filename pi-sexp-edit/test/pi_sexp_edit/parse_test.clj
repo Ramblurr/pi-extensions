@@ -1,7 +1,8 @@
 (ns pi-sexp-edit.parse-test
   (:require
    [clojure.test :refer [deftest is]]
-   [pi-sexp-edit.parse :as sut]))
+   [pi-sexp-edit.parse :as sut]
+   [rewrite-clj.parser :as parser]))
 
 (defn- entry-with-source [document source]
   (first (filter #(= source (:source %)) (:nodes document))))
@@ -66,6 +67,83 @@
             :cr-newline
             (:source (first (filter #(= :newline (:tag %))
                                     (:nodes cr-document))))}))))
+
+(deftest exposes-exact-offsets-and-direct-concrete-children
+  (let [source (str "😀\r\n"
+                    "(wrapper same ; same before child\r\n"
+                    "  same)\r\n")
+        document (sut/parse-source source)
+        nodes (:nodes document)
+        tested-paths [[] [0] [1] [2] [2 2] [2 4] [2 6] [3]]
+        tested-entries (mapv #(get-in document [:by-concrete-path %])
+                             tested-paths)
+        list-entry (get-in document [:by-concrete-path [2]])]
+    (is (= {:all-source-slices (mapv :source nodes)
+            :concrete-children
+            [{:concrete-path [2 0]
+              :end-offset 12
+              :source "wrapper"
+              :start-offset 5}
+             {:concrete-path [2 1]
+              :end-offset 13
+              :source " "
+              :start-offset 12}
+             {:concrete-path [2 2]
+              :end-offset 17
+              :source "same"
+              :start-offset 13}
+             {:concrete-path [2 3]
+              :end-offset 18
+              :source " "
+              :start-offset 17}
+             {:concrete-path [2 4]
+              :end-offset 39
+              :source "; same before child\r\n"
+              :start-offset 18}
+             {:concrete-path [2 5]
+              :end-offset 41
+              :source "  "
+              :start-offset 39}
+             {:concrete-path [2 6]
+              :end-offset 45
+              :source "same"
+              :start-offset 41}]
+            :entry-spans [{:start 0 :end 48}
+                          {:start 0 :end 2}
+                          {:start 2 :end 4}
+                          {:start 4 :end 46}
+                          {:start 13 :end 17}
+                          {:start 18 :end 39}
+                          {:start 41 :end 45}
+                          {:start 46 :end 48}]}
+           {:all-source-slices
+            (mapv (fn [{:keys [end-offset start-offset]}]
+                    (when (every? integer? [start-offset end-offset])
+                      (subs source start-offset end-offset)))
+                  nodes)
+            :concrete-children
+            (mapv #(select-keys %
+                                [:concrete-path
+                                 :end-offset
+                                 :source
+                                 :start-offset])
+                  (sut/concrete-children document
+                                         (:concrete-path list-entry)))
+            :entry-spans (mapv sut/source-span tested-entries)}))))
+
+(deftest rejects-position-metadata-that-disagrees-with-source
+  (let [parsed-root (parser/parse-string-all "(target)")
+        invalid-root (vary-meta parsed-root assoc :end-col 2)
+        error (with-redefs [parser/parse-string-all
+                            (constantly invalid-root)]
+                (try
+                  (sut/parse-source "(target)")
+                  nil
+                  (catch Exception exception
+                    (ex-data exception))))]
+    (is (= {:code :internal-state-error
+            :reason :invalid-source-span}
+           (select-keys error [:code :reason])))))
 
 (deftest indexes-trivia-without-structural-targets
   (let [source   "[a, ; note\n b]"

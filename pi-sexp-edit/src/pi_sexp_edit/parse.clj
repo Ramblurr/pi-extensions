@@ -1,5 +1,6 @@
 (ns pi-sexp-edit.parse
   (:require
+   [clojure.string :as str]
    [pi-sexp-edit.hashes :as hashes]
    [rewrite-clj.node :as node]
    [rewrite-clj.parser :as parser]))
@@ -52,19 +53,82 @@
 
         (recur (inc offset) starts)))))
 
-(defn- exact-source [source starts node concrete-path]
-  (let [{:keys [row col end-row end-col]} (meta node)]
-    (cond
-      (empty? concrete-path)
-      source
+(defn- invalid-source-span [syntax-node concrete-path details]
+  (ex-info "Parser source span disagrees with concrete source"
+           (merge {:code          :internal-state-error
+                   :concrete-path concrete-path
+                   :reason        :invalid-source-span
+                   :tag           (node/tag syntax-node)}
+                  details)))
 
-      (every? some? [row col end-row end-col])
-      (subs source
-            (+ (nth starts (dec row)) (dec col))
-            (+ (nth starts (dec end-row)) (dec end-col)))
+(defn- metadata-source-span [starts syntax-node concrete-path]
+  (let [{:keys [row col end-row end-col]} (meta syntax-node)
+        position [row col end-row end-col]]
+    (cond
+      (not-any? some? position)
+      nil
+
+      (or (not (every? pos-int? position))
+          (> row (count starts))
+          (> end-row (count starts)))
+      (throw (invalid-source-span syntax-node
+                                  concrete-path
+                                  {:position position}))
 
       :else
-      (node/string node))))
+      {:end (+ (nth starts (dec end-row)) (dec end-col))
+       :start (+ (nth starts (dec row)) (dec col))})))
+
+(defn- normalized-line-endings [source]
+  (-> source
+      (str/replace "\r\n" "\n")
+      (str/replace "\r" "\n")))
+
+(defn- exact-source-span
+  [source starts syntax-node concrete-path expected-start]
+  (let [node-source (node/string syntax-node)
+        metadata-span (metadata-source-span starts
+                                            syntax-node
+                                            concrete-path)
+        start (or (:start metadata-span) expected-start)
+        end (or (:end metadata-span)
+                (+ expected-start (count node-source)))
+        bounds? (<= 0 start end (count source))
+        source-slice (when bounds? (subs source start end))]
+    (when-not (and (= expected-start start)
+                   bounds?
+                   (= (normalized-line-endings node-source)
+                      (normalized-line-endings source-slice)))
+      (throw (invalid-source-span
+              syntax-node
+              concrete-path
+              {:end            end
+               :expected-start expected-start
+               :start          start})))
+    {:end-offset end
+     :source source-slice
+     :start-offset start}))
+
+(defn- positioned-children
+  [source starts syntax-node start-offset concrete-path]
+  (if (node/inner? syntax-node)
+    (loop [children (seq (node/children syntax-node))
+           concrete-index 0
+           offset (+ start-offset (node/leader-length syntax-node))
+           result []]
+      (if-let [child (first children)]
+        (let [child-path (conj concrete-path concrete-index)
+              span (exact-source-span source
+                                      starts
+                                      child
+                                      child-path
+                                      offset)]
+          (recur (next children)
+                 (inc concrete-index)
+                 (:end-offset span)
+                 (conj result [concrete-index child span])))
+        result))
+    []))
 
 (defn- structural-candidates [parent]
   (let [children (if (node/inner? parent)
@@ -195,61 +259,73 @@
            vec))))
 
 (defn- indexed-subtree
-  [source starts node concrete-path path parent-path role structural-index structural?]
-  (let [kind          (atom-kind node)
-        position      (select-keys (meta node)
+  [document-source
+   starts
+   syntax-node
+   span
+   concrete-path
+   path
+   parent-path
+   role
+   structural-index
+   structural?]
+  (let [kind          (atom-kind syntax-node)
+        position      (select-keys (meta syntax-node)
                                    [:row :col :end-row :end-col])
         entry         (merge
                        {:atom-kind       kind
                         :atom?           (some? kind)
                         :concrete-path   concrete-path
-                        :node            node
+                        :end-offset      (:end-offset span)
+                        :node            syntax-node
                         :indentation     (some-> (:col position) dec)
                         :parent-path     parent-path
                         :path            path
                         :role            role
-                        :source          (exact-source source
-                                                       starts
-                                                       node
-                                                       concrete-path)
+                        :source          (:source span)
+                        :start-offset    (:start-offset span)
                         :structural-index structural-index
                         :structural?     structural?
-                        :tag             (node/tag node)}
+                        :tag             (node/tag syntax-node)}
                        position)
         structural-parent-path (or path parent-path)
         specs         (into {}
                             (map (juxt :concrete-index identity))
-                            (structural-child-specs node))
-        children      (if (node/inner? node)
-                        (vec (node/children node))
-                        [])]
+                            (structural-child-specs syntax-node))
+        children      (positioned-children document-source
+                                           starts
+                                           syntax-node
+                                           (:start-offset span)
+                                           concrete-path)]
     (into [entry]
           (mapcat
-           (fn [[concrete-index child]]
+           (fn [[concrete-index child child-span]]
              (let [child-concrete-path (conj concrete-path concrete-index)]
                (if-let [{:keys [role structural-index]}
                         (get specs concrete-index)]
                  (let [edge       {:role role :index structural-index}
                        child-path (conj structural-parent-path edge)]
-                   (indexed-subtree source
+                   (indexed-subtree document-source
                                     starts
                                     child
+                                    child-span
                                     child-concrete-path
                                     child-path
                                     structural-parent-path
                                     role
                                     structural-index
                                     true))
-                 (indexed-subtree source
+                 (indexed-subtree document-source
                                   starts
                                   child
+                                  child-span
                                   child-concrete-path
                                   nil
                                   structural-parent-path
                                   nil
                                   nil
                                   false))))
-           (map-indexed vector children)))))
+           children))))
 
 (defn- parse-error [source reason node]
   (ex-info "Unable to parse complete Clojure source"
@@ -325,20 +401,37 @@
   ([source {:keys [document-id]}]
    (let [root             (parsed-root source)
          starts           (line-start-offsets source)
+         root-span        (exact-source-span source starts root [] 0)
          nodes            (indexed-subtree source
                                            starts
                                            root
+                                           root-span
                                            []
                                            []
                                            nil
                                            :document
                                            nil
                                            false)
+         by-concrete-path (into {}
+                                (map (juxt :concrete-path identity))
+                                nodes)
          by-path          (into {}
                                 (keep (fn [entry]
                                         (when (some? (:path entry))
                                           [(:path entry) entry])))
                                 nodes)
+         children-by-concrete-path
+         (reduce
+          (fn [children entry]
+            (let [concrete-path (:concrete-path entry)]
+              (if (seq concrete-path)
+                (update children
+                        (pop concrete-path)
+                        (fnil conj [])
+                        concrete-path)
+                children)))
+          {}
+          nodes)
          children-by-path (reduce
                            (fn [children entry]
                              (if (:structural? entry)
@@ -351,14 +444,33 @@
                            nodes)]
      (hashes/enrich-document
       document-id
-      {:by-concrete-path (into {}
-                               (map (juxt :concrete-path identity))
-                               nodes)
-       :by-path          by-path
-       :children-by-path children-by-path
-       :nodes            nodes
-       :root             root
-       :source           source}))))
+      {:by-concrete-path          by-concrete-path
+       :by-path                   by-path
+       :children-by-concrete-path children-by-concrete-path
+       :children-by-path          children-by-path
+       :nodes                     nodes
+       :root                      root
+       :source                    source}))))
+
+(defn source-span
+  "Returns the exact Java-string span for indexed `entry`."
+  [entry]
+  (let [{:keys [end-offset source start-offset]} entry]
+    (when-not (and (integer? start-offset)
+                   (integer? end-offset)
+                   (<= 0 start-offset end-offset)
+                   (string? source)
+                   (= (count source) (- end-offset start-offset)))
+      (throw (ex-info "Indexed entry has no exact source span"
+                      {:code   :internal-state-error
+                       :reason :invalid-source-span})))
+    {:end end-offset :start start-offset}))
+
+(defn concrete-children
+  "Returns the direct concrete children at `concrete-path`."
+  [document concrete-path]
+  (mapv #(get (:by-concrete-path document) %)
+        (get (:children-by-concrete-path document) concrete-path [])))
 
 (defn node-at-path [document path]
   (get (:by-path document) path))

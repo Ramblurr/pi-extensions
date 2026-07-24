@@ -178,6 +178,21 @@
                                                        [:state :handles]))))
                                  vec)}))))
 
+(deftest duplicate-reader-prefixes-do-not-shift-atom-annotations
+  (let [source (str "; _ before the real child\r\n"
+                    "#__")
+        [document state] (document-state source)
+        result (render-opening document
+                               state
+                               {:depth 1
+                                :include-atoms? true})]
+    (is (= {:created-handles ["§1" "§2"]
+            :source source
+            :text (str "document: D4\n"
+                       "path: src/example.clj\n\n"
+                       "§1 #_§2 _")}
+           (select-keys result [:created-handles :source :text])))))
+
 (deftest collapsed-visible-nodes-retain-handles
   (let [source "(outer (middle value))"
         [document state] (document-state source)

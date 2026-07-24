@@ -359,6 +359,16 @@
                 "  (- 4 1))\n")
            (:candidate-source result)))))
 
+(deftest astral-unicode-before-target-does-not-shift-source-splice
+  (let [source "[😀 (target) tail]\r\n"
+        {:keys [result]}
+        (mutation-case source
+                       "(target)"
+                       {:new_form "(replacement)"
+                        :operation "replace"})]
+    (is (= "[😀 (replacement) tail]\r\n"
+           (:candidate-source result)))))
+
 (deftest replaces-one-target-with-multiple-context-valid-forms
   (let [{:keys [result]}
         (mutation-case "[prefix target suffix]"

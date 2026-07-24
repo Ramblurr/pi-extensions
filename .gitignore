@@ -2,3 +2,4 @@
 pi-usage-report/output/
 prompts/
 .tmuxb_session
+node_modules
