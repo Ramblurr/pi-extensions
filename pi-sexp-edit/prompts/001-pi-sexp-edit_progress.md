@@ -139,10 +139,15 @@
   - Validation: Bun 53 tests, repeated focused cancellation/concurrency tests, full Clojure suite 184 tests / 510 assertions, clj-kondo, cljfmt, Prettier, whitespace, and newline checks pass.
   - Review: Pi Link reviews against `e713da4` found pre-exec timing, post-format cancellation, mocked queue evidence, observation retirement, and non-public import defects; all were fixed tests-first, and final follow-up found no remaining findings.
 - [x] Task 26: Add read and reconciliation acceptance workflows
-  - Commit: `acceptance: cover handle reconciliation workflows` (this task's commit)
+  - Commit: `ccf344e acceptance: cover handle reconciliation workflows`
   - Notes: Added a reusable registered-tool/real-Babashka acceptance harness, six focused fixtures, and README acceptance cases 1–6 for survivor reuse, external reconciliation, conflict safety, ambiguity, and permanent retirement.
   - TDD: RED was 6 acceptance harness-boundary failures; GREEN is 6/6 focused acceptance cases and 59 Bun tests / 97 assertions.
   - Validation: full Bun and Clojure suites (184 tests / 510 assertions), repeated focused acceptance runs, REPL fixture parsing, clj-kondo over `src test`, cljfmt, Prettier, whitespace, and newline checks pass.
   - Review: Pi Link review against `24a4722` found permanent-retirement proof, fixture lint, handle-adjacency, shared-pattern, and focused-external-change gaps; all were fixed, and final follow-up found no remaining findings.
-- [ ] Task 27: Add transaction, repair, comment, and reload acceptance workflows
+- [x] Task 27: Add transaction, repair, comment, and reload acceptance workflows
+  - Commit: `acceptance: cover transactions repair and reload` (this task's commit)
+  - Notes: Added real-tool acceptance cases 7–11 for transactional batches, reported delimiter repair, irreparable rollback, comment ownership, and reload, plus mixed-validity and malformed-current rollback workflows.
+  - TDD: The focused 7-case acceptance suite passed the existing implementation without production changes; review strengthened rollback, exact operation-count, and complete target-bound repair-report assertions.
+  - Validation: focused 7/7; Bun 66 tests / 104 assertions; Clojure 184 tests / 510 assertions; clj-kondo, cljfmt, Prettier, whitespace, and newline checks pass.
+  - Review: Pi Link review against `ccf344e` found irreparable multi-edit rollback and two exact-report assertion gaps; follow-up's sole remaining partial-state proof gap was fixed by successfully retrying the original first-operation handle after exact rollback.
 - [ ] Task 28: Audit packaging, documentation, and the release contract

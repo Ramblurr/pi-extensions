@@ -3552,4 +3552,327 @@ describe("package", () => {
       rmSync(directory, { force: true, recursive: true });
     }
   });
+
+  test("acceptance 7 applies several independent edits in one transaction", async () => {
+    const { directory, path } = acceptanceFile("07-transaction.clj");
+    try {
+      const tools = captureAcceptanceTools();
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      const opened = await executeReadTool(
+        read,
+        { path, depth: 20 },
+        directory,
+      );
+      const annotated = toolText(opened);
+      const result = await executeEditTool(
+        edit,
+        {
+          document: "D1",
+          edits: [
+            {
+              new_form: "(one changed)",
+              operation: "replace",
+              target: handleBefore(annotated, "(one)"),
+            },
+            {
+              new_form: "(two changed)",
+              operation: "replace",
+              target: handleBefore(annotated, "(two)"),
+            },
+            {
+              new_form: "(three changed)",
+              operation: "replace",
+              target: handleBefore(annotated, "(three)"),
+            },
+          ],
+        },
+        directory,
+      );
+      expect({
+        source: readFileSync(path, "utf8"),
+        report: toolText(result).split("\n").includes("applied_edits: 3"),
+      }).toEqual({
+        report: true,
+        source:
+          "#_{:clj-kondo/ignore [:unresolved-symbol]}\n(batch\n (one changed)\n (two changed)\n (three changed))\n",
+      });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("acceptance 8 repairs reparses applies and reports a missing delimiter", async () => {
+    const { directory, path } = acceptanceFile("08-repair.clj");
+    try {
+      const tools = captureAcceptanceTools();
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      const opened = await executeReadTool(
+        read,
+        { path, depth: 20 },
+        directory,
+      );
+      const target = handleBefore(toolText(opened), "(old)");
+      const result = await executeEditTool(
+        edit,
+        {
+          document: "D1",
+          edits: [{ new_form: "(fixed", operation: "replace", target }],
+        },
+        directory,
+      );
+      const report = toolText(result);
+      const repairLine = report
+        .split("\n")
+        .find((line) => line.startsWith("repairs: "));
+      expect({
+        repairLine,
+        source: readFileSync(path, "utf8"),
+      }).toEqual({
+        repairLine: `repairs: [{"after":"(fixed)","before":"(fixed","edit-index":0,"target":"${target}"}]`,
+        source:
+          "#_{:clj-kondo/ignore [:unresolved-symbol]}\n(repair-case\n (fixed))\n",
+      });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("acceptance 9 rejects irreparable input without changing the file", async () => {
+    const { directory, path } = acceptanceFile("07-transaction.clj");
+    try {
+      const original = readFileSync(path, "utf8");
+      const tools = captureAcceptanceTools();
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      const opened = await executeReadTool(
+        read,
+        { path, depth: 20 },
+        directory,
+      );
+      const annotated = toolText(opened);
+      const valid = handleBefore(annotated, "(one)");
+      const irreparable = handleBefore(annotated, "(two)");
+      const error = await caught(() =>
+        executeEditTool(
+          edit,
+          {
+            document: "D1",
+            edits: [
+              {
+                new_form: "(one must-not-apply)",
+                operation: "replace",
+                target: valid,
+              },
+              { new_form: "#", operation: "replace", target: irreparable },
+            ],
+          },
+          directory,
+        ),
+      );
+      const rolledBack = readFileSync(path, "utf8");
+      await executeEditTool(
+        edit,
+        {
+          document: "D1",
+          edits: [
+            {
+              new_form: "(one survives)",
+              operation: "replace",
+              target: valid,
+            },
+          ],
+        },
+        directory,
+      );
+      expect({
+        code: (error as Error & { code?: string })?.code,
+        rolledBack,
+        source: readFileSync(path, "utf8"),
+      }).toEqual({
+        code: "invalid-form",
+        rolledBack: original,
+        source: original.replace("(one)", "(one survives)"),
+      });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("acceptance 10 preserves an externally edited leading comment", async () => {
+    const { directory, path } = acceptanceFile("10-comments.clj");
+    try {
+      const original = readFileSync(path, "utf8");
+      const tools = captureAcceptanceTools();
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      const opened = await executeReadTool(
+        read,
+        { path, depth: 20 },
+        directory,
+      );
+      const target = handleBefore(toolText(opened), "(comment-target old)");
+      const external = original.replace("; leading old", "; leading edited");
+      writeFileSync(path, external);
+      await executeEditTool(
+        edit,
+        {
+          document: "D1",
+          edits: [
+            { new_form: "(comment-target new)", operation: "replace", target },
+          ],
+        },
+        directory,
+      );
+      expect(readFileSync(path, "utf8")).toBe(
+        external.replace("(comment-target old)", "(comment-target new)"),
+      );
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("acceptance 11 requires a new read after extension reload", async () => {
+    const { directory, path } = acceptanceFile("11-reload.clj");
+    try {
+      const firstTools = captureAcceptanceTools();
+      const firstRead = firstTools.find(({ name }) => name === "sexp_read");
+      const opened = await executeReadTool(
+        firstRead,
+        { path, depth: 20 },
+        directory,
+      );
+      const oldHandle = handleBefore(toolText(opened), "(reload-target old)");
+      const reloadedTools = captureAcceptanceTools();
+      const reloadedRead = reloadedTools.find(
+        ({ name }) => name === "sexp_read",
+      );
+      const reloadedEdit = reloadedTools.find(
+        ({ name }) => name === "sexp_edit",
+      );
+      const staleError = await caught(() =>
+        executeEditTool(
+          reloadedEdit,
+          {
+            document: "D1",
+            edits: [
+              {
+                new_form: "(must-not-apply)",
+                operation: "replace",
+                target: oldHandle,
+              },
+            ],
+          },
+          directory,
+        ),
+      );
+      const reopened = await executeReadTool(
+        reloadedRead,
+        { path, depth: 20 },
+        directory,
+      );
+      const newHandle = handleBefore(toolText(reopened), "(reload-target old)");
+      await executeEditTool(
+        reloadedEdit,
+        {
+          document: "D1",
+          edits: [
+            {
+              new_form: "(reload-target new)",
+              operation: "replace",
+              target: newHandle,
+            },
+          ],
+        },
+        directory,
+      );
+      expect({
+        source: readFileSync(path, "utf8"),
+        staleCode: (staleError as Error & { code?: string })?.code,
+      }).toEqual({
+        source:
+          "#_{:clj-kondo/ignore [:unresolved-symbol]}\n(reload-target new)\n",
+        staleCode: "unknown",
+      });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("mixed-validity transactional batch writes no operation", async () => {
+    const { directory, path } = acceptanceFile("07-transaction.clj");
+    try {
+      const original = readFileSync(path, "utf8");
+      const tools = captureAcceptanceTools();
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      const opened = await executeReadTool(
+        read,
+        { path, depth: 20 },
+        directory,
+      );
+      const one = handleBefore(toolText(opened), "(one)");
+      const error = await caught(() =>
+        executeEditTool(
+          edit,
+          {
+            document: "D1",
+            edits: [
+              { new_form: "(one changed)", operation: "replace", target: one },
+              { new_form: "(invalid)", operation: "replace", target: "§zzzz" },
+            ],
+          },
+          directory,
+        ),
+      );
+      expect({
+        code: (error as Error & { code?: string })?.code,
+        source: readFileSync(path, "utf8"),
+      }).toEqual({ code: "unknown", source: original });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("malformed current source is never repaired or written by either tool", async () => {
+    const { directory, path } = acceptanceFile("08-repair.clj");
+    try {
+      const tools = captureAcceptanceTools();
+      const read = tools.find(({ name }) => name === "sexp_read");
+      const edit = tools.find(({ name }) => name === "sexp_edit");
+      const opened = await executeReadTool(
+        read,
+        { path, depth: 20 },
+        directory,
+      );
+      const target = handleBefore(toolText(opened), "(old)");
+      const malformed = "(malformed";
+      writeFileSync(path, malformed);
+      const readError = await caught(() =>
+        executeReadTool(read, { document: "D1" }, directory),
+      );
+      const editError = await caught(() =>
+        executeEditTool(
+          edit,
+          {
+            document: "D1",
+            edits: [{ new_form: "(repair", operation: "replace", target }],
+          },
+          directory,
+        ),
+      );
+      expect({
+        editCode: (editError as Error & { code?: string })?.code,
+        readCode: (readError as Error & { code?: string })?.code,
+        source: readFileSync(path, "utf8"),
+      }).toEqual({
+        editCode: "parse-error",
+        readCode: "parse-error",
+        source: malformed,
+      });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
 });
