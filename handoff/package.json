@@ -9,6 +9,9 @@
     "handoff"
   ],
   "license": "MIT",
+  "scripts": {
+    "test": "node --test link-session-state.test.ts"
+  },
   "pi": {
     "extensions": [
       "./index.ts"
@@ -16,6 +19,7 @@
   },
   "files": [
     "index.ts",
+    "link-session-state.ts",
     "README.md"
   ],
   "peerDependencies": {

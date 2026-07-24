@@ -22,6 +22,7 @@ import { complete, type Message } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { BorderedLoader, convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { applyLinkSessionTransfer, resolveLinkSessionTransfer } from "./link-session-state.ts";
 
 const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused prompt that:
 
@@ -252,11 +253,16 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// Create new session with parent tracking. Use the replacement-session
-			// context for post-switch UI work; the original ctx is stale after a
-			// successful session replacement.
+			// Snapshot pi-link's persisted identity while the departing context is valid.
+			const linkSessionTransfer = resolveLinkSessionTransfer(ctx.sessionManager.getEntries());
+
+			// Create new session with parent tracking. Seed the replacement before its
+			// extensions receive session_start, then use only the fresh replacement context.
 			const newSessionResult = await ctx.newSession({
 				parentSession: currentSessionFile,
+				setup: async (sessionManager) => {
+					applyLinkSessionTransfer(sessionManager, linkSessionTransfer);
+				},
 				withSession: async (replacementCtx) => {
 					replacementCtx.ui.setEditorText(editedPrompt);
 					replacementCtx.ui.notify("Handoff ready. Submit when ready.", "info");
