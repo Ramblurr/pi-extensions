@@ -8,6 +8,7 @@ Extensions and tools for [pi](https://github.com/earendil-works/pi), the termina
 |---------|-------------|
 | [pi-ghost](pi-ghost) | Ephemeral btw and side conversation overlay — open a temporary ghost session inside the current pi UI |
 | [brepl-balance](brepl-balance) | Runs `brepl balance` after Pi writes or edits Clojure files and reports failures to the agent |
+| [reload](reload) | Gives agents a tool that reloads Pi extensions and other runtime resources |
 
 ## Standalone tools
 

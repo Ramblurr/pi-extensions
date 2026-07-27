@@ -1,0 +1,24 @@
+{
+  "name": "@ramblurr/pi-reload",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Let Pi agents reload runtime resources from a tool call",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "reload"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
