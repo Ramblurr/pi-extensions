@@ -1,0 +1,25 @@
+{
+  "name": "@ramblurr/pi-link-control",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Let Pi agents connect to, rename on, and disconnect from Pi Link",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-link"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
