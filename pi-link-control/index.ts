@@ -134,7 +134,6 @@ export default function piLinkControlExtension(pi: ExtensionAPI): void {
           },
         ],
         details: { action: params.action, mechanism: "editor-command-dispatch" },
-        terminate: true,
       };
     },
   });
