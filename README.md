@@ -10,6 +10,7 @@ Extensions and tools for [pi](https://github.com/earendil-works/pi), the termina
 | [brepl-balance](brepl-balance) | Runs `brepl balance` after Pi writes or edits Clojure files and reports failures to the agent |
 | [reload](reload) | Gives agents a tool that reloads Pi extensions and other runtime resources |
 | [pi-link-control](pi-link-control) | Lets agents connect to, rename on, and disconnect from Pi Link |
+| [pi-openai-fast](pi-openai-fast) | Enables OpenAI Codex Fast mode for eligible ChatGPT-auth models |
 
 ## Standalone tools
 
