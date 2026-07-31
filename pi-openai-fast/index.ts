@@ -227,7 +227,6 @@ export default function openAIFastExtension(pi: ExtensionAPI) {
 		type: "boolean",
 		default: false,
 	});
-	const initialOverride: FastOverride = pi.getFlag("fast") ? "on" : "auto";
 
 	const states = new WeakMap<object, SessionState>();
 
@@ -236,7 +235,7 @@ export default function openAIFastExtension(pi: ExtensionAPI) {
 		if (!state) {
 			state = {
 				config: loadConfig(ctx),
-				override: initialOverride,
+				override: pi.getFlag("fast") === true ? "on" : "auto",
 			};
 			states.set(ctx.sessionManager, state);
 		}
@@ -246,7 +245,7 @@ export default function openAIFastExtension(pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		const state: SessionState = {
 			config: loadConfig(ctx),
-			override: initialOverride,
+			override: pi.getFlag("fast") === true ? "on" : "auto",
 		};
 		states.set(ctx.sessionManager, state);
 		updateStatus(ctx, state);
