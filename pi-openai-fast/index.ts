@@ -222,6 +222,13 @@ function injectFastServiceTier(
 }
 
 export default function openAIFastExtension(pi: ExtensionAPI) {
+	pi.registerFlag("fast", {
+		description: "Enable OpenAI Codex Fast mode for eligible ChatGPT-auth models",
+		type: "boolean",
+		default: false,
+	});
+	const initialOverride: FastOverride = pi.getFlag("fast") ? "on" : "auto";
+
 	const states = new WeakMap<object, SessionState>();
 
 	function getState(ctx: ExtensionContext): SessionState {
@@ -229,7 +236,7 @@ export default function openAIFastExtension(pi: ExtensionAPI) {
 		if (!state) {
 			state = {
 				config: loadConfig(ctx),
-				override: "auto",
+				override: initialOverride,
 			};
 			states.set(ctx.sessionManager, state);
 		}
@@ -239,7 +246,7 @@ export default function openAIFastExtension(pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		const state: SessionState = {
 			config: loadConfig(ctx),
-			override: "auto",
+			override: initialOverride,
 		};
 		states.set(ctx.sessionManager, state);
 		updateStatus(ctx, state);

@@ -32,6 +32,16 @@ Run `/fast` to toggle Fast mode on or off for the current session/runtime. The c
 
 The extension defaults to off so installing the full collection does not accidentally spend Fast-mode credits.
 
+### CLI flag
+
+Pass `--fast` to start with Fast mode enabled:
+
+```bash
+pi --no-session --provider openai-codex --model gpt-5.6-luna --thinking high --fast
+```
+
+The usual eligibility checks still apply. `/fast` can toggle the mode off again during an interactive run.
+
 ## Config
 
 Optional global config:
