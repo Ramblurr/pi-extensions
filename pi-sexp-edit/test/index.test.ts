@@ -14,7 +14,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -776,6 +776,128 @@ describe("package", () => {
       editLeaksForm: false,
       read: "sexp_read D4 §7 · depth 2",
       renderersPresent: ["function", "function"],
+    });
+  });
+
+  test("settled tool rows compact metadata and render human-scale paths", () => {
+    const tools = Object.fromEntries(
+      captureTools().map((tool) => [tool.name, tool]),
+    );
+    const theme = {
+      bold: (text: string) => text,
+      fg: (_color: string, text: string) => text,
+    };
+    const cwd = join(homedir(), "work", "pi-sexp-edit");
+    const render = (component: RenderedComponent | undefined): string =>
+      component?.render(240).map((line) => line.trimEnd()).join("\n").trimEnd() ??
+      "";
+
+    const readArgs = { depth: 2, path: join(cwd, "src/example.clj") };
+    const readState = {};
+    const readCall = tools.sexp_read.renderCall?.(readArgs, theme, {
+      cwd,
+      lastComponent: undefined,
+      state: readState,
+    });
+    const readResult = tools.sexp_read.renderResult?.(
+      {
+        content: [
+          {
+            type: "text",
+            text: `document: D4\npath: ${join(cwd, "src/example.clj")}\n\n§1 (ns example.core)`,
+          },
+        ],
+        details: { document: "D4" },
+      },
+      { expanded: true, isPartial: false },
+      theme,
+      {
+        args: readArgs,
+        cwd,
+        isError: false,
+        lastComponent: undefined,
+        state: readState,
+      },
+    );
+
+    const editArgs = {
+      document: "D4",
+      edits: [
+        { new_form: "(a)", operation: "replace", target: "§1" },
+        { new_form: "(b)", operation: "replace", target: "§2" },
+      ],
+    };
+    const editState = {};
+    const editCall = tools.sexp_edit.renderCall?.(editArgs, theme, {
+      cwd,
+      lastComponent: undefined,
+      state: editState,
+    });
+    const editResult = tools.sexp_edit.renderResult?.(
+      {
+        content: [
+          {
+            type: "text",
+            text: [
+              "document: D4",
+              "external_changes_reconciled: true",
+              "applied_edits: 2",
+              'repairs: [{"target":"§1"}]',
+              "retired_handles: §1 §2",
+              "created_handles: §3",
+              'omitted_internal_counts: {"retired-handles":3}',
+              "",
+              `--- ${join(cwd, "src/example.clj")}`,
+              `+++ ${join(cwd, "src/example.clj")}`,
+              "@@ -1 +1 @@",
+              "-(old)",
+              "+(new)",
+            ].join("\n"),
+          },
+        ],
+        details: { document: "D4" },
+      },
+      { expanded: true, isPartial: false },
+      theme,
+      {
+        args: editArgs,
+        cwd,
+        isError: false,
+        lastComponent: undefined,
+        state: editState,
+      },
+    );
+
+    const homeCall = render(
+      tools.sexp_read.renderCall?.(
+        { path: join(homedir(), "shared/example.clj") },
+        theme,
+        { cwd, lastComponent: undefined, state: {} },
+      ),
+    );
+    const externalCall = render(
+      tools.sexp_read.renderCall?.(
+        { path: "/opt/shared/example.clj" },
+        theme,
+        { cwd, lastComponent: undefined, state: {} },
+      ),
+    );
+
+    expect({
+      editCall: render(editCall),
+      editResult: render(editResult),
+      externalCall,
+      homeCall,
+      readCall: render(readCall),
+      readResult: render(readResult),
+    }).toEqual({
+      editCall: "sexp_edit D4 · 2 edits · external reconciled · 1 repair",
+      editResult:
+        "--- src/example.clj\n+++ src/example.clj\n@@ -1 +1 @@\n-(old)\n+(new)",
+      externalCall: "sexp_read /opt/shared/example.clj",
+      homeCall: "sexp_read ~/shared/example.clj",
+      readCall: "sexp_read D4 · depth 2 · src/example.clj",
+      readResult: "§1 (ns example.core)",
     });
   });
 

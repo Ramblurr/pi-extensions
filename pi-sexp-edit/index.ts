@@ -23,8 +23,8 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, extname, join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const HANDLE_MARKER = "§";
@@ -682,17 +682,29 @@ interface RenderableToolResult {
   content: Array<{ type: string; text?: string }>;
 }
 
+interface SexpRenderState {
+  call?: Text;
+}
+
+interface LeadingMetadata {
+  body: string;
+  values: Record<string, string>;
+}
+
+function toolResultText(result: RenderableToolResult): string {
+  return result.content
+    .filter((item) => item.type === "text" && typeof item.text === "string")
+    .map((item) => item.text as string)
+    .join("\n");
+}
+
 function renderToolResultText(
-  result: RenderableToolResult,
+  output: string,
   expanded: boolean,
   theme: Theme,
   isError: boolean,
   previous?: Text,
 ): Text {
-  const output = result.content
-    .filter((item) => item.type === "text" && typeof item.text === "string")
-    .map((item) => item.text as string)
-    .join("\n");
   const lines = output.split("\n");
   while (lines.at(-1) === "") lines.pop();
   const visibleLines = expanded ? lines : lines.slice(0, TOOL_PREVIEW_LINES);
@@ -708,6 +720,95 @@ function renderToolResultText(
   const component = previous ?? new Text("", 0, 0);
   component.setText(text);
   return component;
+}
+
+function pathWithin(root: string, path: string): string | undefined {
+  const candidate = relative(root, path);
+  if (candidate === "") return ".";
+  if (candidate === ".." || candidate.startsWith(`..${sep}`) || isAbsolute(candidate)) {
+    return undefined;
+  }
+  return candidate;
+}
+
+function displayPath(path: string, cwd: string): string {
+  const absolute = isAbsolute(path) ? path : resolve(cwd, normalizeToolPath(path));
+  const local = pathWithin(cwd, absolute);
+  if (local !== undefined) return local;
+  const fromHome = pathWithin(homedir(), absolute);
+  if (fromHome === ".") return "~";
+  if (fromHome !== undefined) return `~/${fromHome}`;
+  return absolute;
+}
+
+function splitLeadingMetadata(output: string): LeadingMetadata {
+  const separator = output.indexOf("\n\n");
+  if (separator === -1) return { body: output, values: {} };
+  const values: Record<string, string> = {};
+  for (const line of output.slice(0, separator).split("\n")) {
+    const delimiter = line.indexOf(": ");
+    if (delimiter === -1) return { body: output, values: {} };
+    values[line.slice(0, delimiter)] = line.slice(delimiter + 2);
+  }
+  return { body: output.slice(separator + 2), values };
+}
+
+function normalizeDiffPaths(output: string, cwd: string): string {
+  return output.replace(/^(---|\+\+\+) (.+)$/gm, (_line, marker, path) =>
+    `${marker} ${displayPath(path, cwd)}`,
+  );
+}
+
+function jsonArrayCount(value: string | undefined): number {
+  if (!value) return 0;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function readCallText(
+  parameters: SexpReadInput,
+  theme: Theme,
+  cwd: string,
+  metadata: Record<string, string> = {},
+): string {
+  const document = metadata.document;
+  const target = metadata.target ?? ("target" in parameters ? parameters.target : undefined);
+  const path = metadata.path;
+  const inputLocation =
+    "path" in parameters ? displayPath(parameters.path, cwd) : parameters.document;
+  let text =
+    theme.fg("toolTitle", theme.bold("sexp_read")) +
+    ` ${theme.fg("accent", document ?? inputLocation)}`;
+  if (target) text += ` ${theme.fg("accent", target)}`;
+  const depth = parameters.depth ?? (target ? 2 : 0);
+  if (parameters.depth !== undefined || document) {
+    text += theme.fg("muted", ` · depth ${depth}`);
+  }
+  if (path) text += theme.fg("muted", ` · ${displayPath(path, cwd)}`);
+  return text;
+}
+
+function editCallText(
+  parameters: SexpEditInput,
+  theme: Theme,
+  metadata: Record<string, string> = {},
+): string {
+  const editCount = Number(metadata.applied_edits ?? parameters.edits.length);
+  const parts = [`${editCount} ${editCount === 1 ? "edit" : "edits"}`];
+  if (metadata.external_changes_reconciled === "true") {
+    parts.push("external reconciled");
+  }
+  const repairs = jsonArrayCount(metadata.repairs);
+  if (repairs > 0) parts.push(`${repairs} ${repairs === 1 ? "repair" : "repairs"}`);
+  return (
+    theme.fg("toolTitle", theme.bold("sexp_edit")) +
+    ` ${theme.fg("accent", metadata.document ?? parameters.document)}` +
+    theme.fg("muted", ` · ${parts.join(" · ")}`)
+  );
 }
 
 function displayHandles(value: unknown): string {
@@ -929,20 +1030,10 @@ export function createSexpExtension(
     description: readDescription,
     parameters: sexpReadSchema,
     renderCall(parameters, theme, context) {
-      const location =
-        "path" in parameters ? parameters.path : parameters.document;
-      let text =
-        theme.fg("toolTitle", theme.bold("sexp_read")) +
-        ` ${theme.fg("accent", location)}`;
-      if ("target" in parameters) {
-        text += ` ${theme.fg("accent", parameters.target)}`;
-      }
-      if (parameters.depth !== undefined) {
-        text += theme.fg("muted", ` · depth ${parameters.depth}`);
-      }
       const component =
         (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      component.setText(text);
+      component.setText(readCallText(parameters, theme, context.cwd));
+      if (context.state) (context.state as SexpRenderState).call = component;
       return component;
     },
     async execute(_toolCallId, parameters, signal, _onUpdate, context) {
@@ -1008,8 +1099,13 @@ export function createSexpExtension(
       });
     },
     renderResult(result, { expanded }, theme, context) {
+      const output = splitLeadingMetadata(toolResultText(result));
+      const call = (context.state as SexpRenderState | undefined)?.call;
+      if (call && output.values.document) {
+        call.setText(readCallText(context.args, theme, context.cwd, output.values));
+      }
       return renderToolResultText(
-        result,
+        normalizeDiffPaths(output.body, context.cwd),
         expanded,
         theme,
         context.isError,
@@ -1024,17 +1120,10 @@ export function createSexpExtension(
     description: editDescription,
     parameters: sexpEditSchema,
     renderCall(parameters, theme, context) {
-      const editCount = parameters.edits.length;
-      const text =
-        theme.fg("toolTitle", theme.bold("sexp_edit")) +
-        ` ${theme.fg("accent", parameters.document)}` +
-        theme.fg(
-          "muted",
-          ` · ${editCount} ${editCount === 1 ? "edit" : "edits"}`,
-        );
       const component =
         (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      component.setText(text);
+      component.setText(editCallText(parameters, theme));
+      if (context.state) (context.state as SexpRenderState).call = component;
       return component;
     },
     async execute(_toolCallId, parameters, signal) {
@@ -1122,8 +1211,13 @@ export function createSexpExtension(
       );
     },
     renderResult(result, { expanded }, theme, context) {
+      const output = splitLeadingMetadata(toolResultText(result));
+      const call = (context.state as SexpRenderState | undefined)?.call;
+      if (call && output.values.document) {
+        call.setText(editCallText(context.args, theme, output.values));
+      }
       return renderToolResultText(
-        result,
+        normalizeDiffPaths(output.body, context.cwd),
         expanded,
         theme,
         context.isError,
