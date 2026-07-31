@@ -30,7 +30,7 @@ type FastOverride = "auto" | "on" | "off";
 type OpenAIFastConfig = {
 	/** Default Fast-mode state when there is no session override. */
 	enabled: boolean;
-	/** Show a compact `fast` status when Fast mode is active for the current model. */
+	/** Show a compact lightning status when Fast mode is active for the current model. */
 	showStatus: boolean;
 };
 
@@ -179,7 +179,7 @@ function updateStatus(ctx: ExtensionContext, state: SessionState): void {
 	const eligibility = getEligibility(ctx);
 	ctx.ui.setStatus(
 		EXTENSION_ID,
-		isFastEnabled(state) && eligibility.eligible ? "fast" : undefined,
+		isFastEnabled(state) && eligibility.eligible ? "⚡" : undefined,
 	);
 }
 
