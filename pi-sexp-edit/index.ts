@@ -3,10 +3,13 @@ import {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
   formatSize,
+  keyText,
   truncateHead,
   withFileMutationQueue as queueFileMutation,
   type ExtensionAPI,
+  type Theme,
 } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { randomUUID } from "node:crypto";
 import {
   chmod,
@@ -673,6 +676,40 @@ async function discardBoundedOutput(output: BoundedOutput): Promise<void> {
   }
 }
 
+const TOOL_PREVIEW_LINES = 10;
+
+interface RenderableToolResult {
+  content: Array<{ type: string; text?: string }>;
+}
+
+function renderToolResultText(
+  result: RenderableToolResult,
+  expanded: boolean,
+  theme: Theme,
+  isError: boolean,
+  previous?: Text,
+): Text {
+  const output = result.content
+    .filter((item) => item.type === "text" && typeof item.text === "string")
+    .map((item) => item.text as string)
+    .join("\n");
+  const lines = output.split("\n");
+  while (lines.at(-1) === "") lines.pop();
+  const visibleLines = expanded ? lines : lines.slice(0, TOOL_PREVIEW_LINES);
+  const color = isError ? "error" : "toolOutput";
+  let text = visibleLines.map((line) => theme.fg(color, line)).join("\n");
+  const hiddenLines = lines.length - visibleLines.length;
+  if (hiddenLines > 0) {
+    text +=
+      `\n${theme.fg("muted", `... (${hiddenLines} more lines, `)}` +
+      theme.fg("dim", keyText("app.tools.expand")) +
+      theme.fg("muted", " to expand)");
+  }
+  const component = previous ?? new Text("", 0, 0);
+  component.setText(text);
+  return component;
+}
+
 function displayHandles(value: unknown): string {
   return Array.isArray(value) && value.length > 0 ? value.join(" ") : "none";
 }
@@ -891,6 +928,23 @@ export function createSexpExtension(
     label: "S-expression Read",
     description: readDescription,
     parameters: sexpReadSchema,
+    renderCall(parameters, theme, context) {
+      const location =
+        "path" in parameters ? parameters.path : parameters.document;
+      let text =
+        theme.fg("toolTitle", theme.bold("sexp_read")) +
+        ` ${theme.fg("accent", location)}`;
+      if ("target" in parameters) {
+        text += ` ${theme.fg("accent", parameters.target)}`;
+      }
+      if (parameters.depth !== undefined) {
+        text += theme.fg("muted", ` · depth ${parameters.depth}`);
+      }
+      const component =
+        (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      component.setText(text);
+      return component;
+    },
     async execute(_toolCallId, parameters, signal, _onUpdate, context) {
       ensureNotCancelled(signal);
       const record =
@@ -953,6 +1007,15 @@ export function createSexpExtension(
         };
       });
     },
+    renderResult(result, { expanded }, theme, context) {
+      return renderToolResultText(
+        result,
+        expanded,
+        theme,
+        context.isError,
+        context.lastComponent as Text | undefined,
+      );
+    }
   });
 
   pi.registerTool({
@@ -960,6 +1023,20 @@ export function createSexpExtension(
     label: "S-expression Edit",
     description: editDescription,
     parameters: sexpEditSchema,
+    renderCall(parameters, theme, context) {
+      const editCount = parameters.edits.length;
+      const text =
+        theme.fg("toolTitle", theme.bold("sexp_edit")) +
+        ` ${theme.fg("accent", parameters.document)}` +
+        theme.fg(
+          "muted",
+          ` · ${editCount} ${editCount === 1 ? "edit" : "edits"}`,
+        );
+      const component =
+        (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      component.setText(text);
+      return component;
+    },
     async execute(_toolCallId, parameters, signal) {
       ensureNotCancelled(signal);
       const record = getPublicDocument(documents, parameters.document);
@@ -1044,6 +1121,15 @@ export function createSexpExtension(
         }),
       );
     },
+    renderResult(result, { expanded }, theme, context) {
+      return renderToolResultText(
+        result,
+        expanded,
+        theme,
+        context.isError,
+        context.lastComponent as Text | undefined,
+      );
+    }
   });
 }
 

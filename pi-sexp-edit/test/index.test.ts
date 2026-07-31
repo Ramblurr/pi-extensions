@@ -79,12 +79,27 @@ mock.module("@earendil-works/pi-ai", () => ({
 const extensionModule = await import("../index.ts");
 const extension = extensionModule.default;
 
+interface RenderedComponent {
+  render(width: number): string[];
+}
+
 interface CapturedTool {
   description: string;
   execute?: (...args: unknown[]) => unknown;
   label: string;
   name: string;
   parameters: unknown;
+  renderCall?: (
+    args: unknown,
+    theme: unknown,
+    context: unknown,
+  ) => RenderedComponent;
+  renderResult?: (
+    result: unknown,
+    options: unknown,
+    theme: unknown,
+    context: unknown,
+  ) => RenderedComponent;
 }
 
 function captureTools(): CapturedTool[] {
@@ -601,9 +616,10 @@ describe("package", () => {
       peers: [
         "@earendil-works/pi-ai",
         "@earendil-works/pi-coding-agent",
+        "@earendil-works/pi-tui",
         "typebox",
       ],
-      peerRanges: ["*", "*", "*"],
+      peerRanges: ["*", "*", "*", "*"],
       readmeSections: true,
       released: true,
       scripts: ["test", "test:clj", "test:ts"],
@@ -663,6 +679,104 @@ describe("package", () => {
       "sexp_read",
       "sexp_edit",
     ]);
+  });
+
+  test("tool renderers collapse long human-facing output and expand on demand", () => {
+    const tools = Object.fromEntries(
+      captureTools().map((tool) => [tool.name, tool]),
+    );
+    const theme = {
+      bold: (text: string) => text,
+      fg: (_color: string, text: string) => text,
+    };
+    const output = Array.from(
+      { length: 12 },
+      (_, index) => `output-line-${index + 1}`,
+    ).join("\n");
+    const renderResult = (tool: CapturedTool, expanded: boolean): string => {
+      const component = tool.renderResult?.(
+        { content: [{ type: "text", text: output }], details: {} },
+        { expanded, isPartial: false },
+        theme,
+        { isError: false, lastComponent: undefined },
+      );
+      if (!component) return "";
+      return component.render(240).join("\n").trimEnd();
+    };
+    const collapsedRead = renderResult(tools.sexp_read, false);
+    const collapsedEdit = renderResult(tools.sexp_edit, false);
+    const expandedRead = renderResult(tools.sexp_read, true);
+    const expandedEdit = renderResult(tools.sexp_edit, true);
+    expect({
+      collapsedEditHasHint: collapsedEdit.includes("to expand"),
+      collapsedEditHidesTail: !collapsedEdit.includes("output-line-11"),
+      collapsedReadHasHint: collapsedRead.includes("to expand"),
+      collapsedReadHidesTail: !collapsedRead.includes("output-line-11"),
+      expandedEditHasTail: expandedEdit.includes("output-line-12"),
+      expandedEditHidesHint: !expandedEdit.includes("to expand"),
+      expandedReadHasTail: expandedRead.includes("output-line-12"),
+      expandedReadHidesHint: !expandedRead.includes("to expand"),
+      renderersPresent: [
+        typeof tools.sexp_read?.renderResult,
+        typeof tools.sexp_edit?.renderResult,
+      ],
+    }).toEqual({
+      collapsedEditHasHint: true,
+      collapsedEditHidesTail: true,
+      collapsedReadHasHint: true,
+      collapsedReadHidesTail: true,
+      expandedEditHasTail: true,
+      expandedEditHidesHint: true,
+      expandedReadHasTail: true,
+      expandedReadHidesHint: true,
+      renderersPresent: ["function", "function"],
+    });
+  });
+
+  test("tool call renderers summarize targets without echoing edit forms", () => {
+    const tools = Object.fromEntries(
+      captureTools().map((tool) => [tool.name, tool]),
+    );
+    const theme = {
+      bold: (text: string) => text,
+      fg: (_color: string, text: string) => text,
+    };
+    const renderCall = (tool: CapturedTool, args: unknown): string => {
+      const component = tool.renderCall?.(args, theme, {
+        lastComponent: undefined,
+      });
+      if (!component) return "";
+      return component.render(240).join("\n").trimEnd();
+    };
+    const read = renderCall(tools.sexp_read, {
+      depth: 2,
+      document: "D4",
+      target: "§7",
+    });
+    const edit = renderCall(tools.sexp_edit, {
+      document: "D4",
+      edits: [
+        {
+          new_form: "(secret replacement body)",
+          operation: "replace",
+          target: "§7",
+        },
+      ],
+    });
+    expect({
+      edit,
+      editLeaksForm: edit.includes("secret replacement body"),
+      read,
+      renderersPresent: [
+        typeof tools.sexp_read?.renderCall,
+        typeof tools.sexp_edit?.renderCall,
+      ],
+    }).toEqual({
+      edit: "sexp_edit D4 · 1 edit",
+      editLeaksForm: false,
+      read: "sexp_read D4 §7 · depth 2",
+      renderersPresent: ["function", "function"],
+    });
   });
 
   test("read accepts exactly path or document and scopes target to document", () => {
