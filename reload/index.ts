@@ -246,11 +246,11 @@ export default function reloadExtension(pi: ExtensionAPI) {
     name: "reload_runtime",
     label: "Reload Runtime",
     description:
-      "Reload Pi keybindings, extensions, skills, prompts, themes, and context files. Use this after creating or changing extensions, skills, prompts, or other Pi resources that require /reload.",
+      "NEVER use unless the user gives permission. Reload Pi keybindings, extensions, skills, prompts, themes, and context files. Use this after creating or changing extensions, skills, prompts, or other Pi resources that require /reload.",
     promptSnippet:
-      "Reload Pi keybindings, extensions, skills, prompts, themes, and context files after changing Pi resources.",
+      "NEVER use unless the user gives permission. Reload Pi keybindings, extensions, skills, prompts, themes, and context files after changing Pi resources.",
     promptGuidelines: [
-      "Use reload_runtime after changing Pi extensions, skills, prompts, themes, keybindings, or context files that require /reload.",
+      "NEVER use unless the user gives permission. Use reload_runtime after changing Pi extensions, skills, prompts, themes, keybindings, or context files that require /reload.",
     ],
     parameters: Type.Object({
       reason: Type.Optional(
