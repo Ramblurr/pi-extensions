@@ -30,7 +30,7 @@ Fast mode is only injected when all of these are true:
 
 Run `/fast` to toggle Fast mode on or off for the current session/runtime. The command reports the new state in chat, and the footer shows `⚡` while Fast mode is active for an eligible model.
 
-The extension defaults to off so installing the full collection does not accidentally spend Fast-mode credits.
+The extension defaults to on for new sessions; set `"enabled": false` in the config file or run `/fast` to turn it off.
 
 ### CLI flag
 
@@ -60,12 +60,12 @@ Here `<pi-config-dir>` is Pi's runtime config directory name (`CONFIG_DIR_NAME`;
 
 ```json
 {
-  "enabled": false,
+  "enabled": true,
   "showStatus": true
 }
 ```
 
-- `enabled`: default Fast-mode state when there is no session override.
+- `enabled`: default Fast-mode state when there is no session override (defaults to `true`).
 - `showStatus`: show a compact `⚡` status when Fast mode is active for the current model.
 
 ## Install
