@@ -1,5 +1,7 @@
 # pi-link-control
 
+> **This extension has been replaced by our Pi Link patch.** Pi Link now connects and disconnects directly, so this extension no longer needs to send slash commands through the editor.
+
 A Pi extension that gives agents a `link_control` tool for controlling their own [Pi Link](https://github.com/alvivar/pi-link) connection.
 
 The tool supports two actions:
