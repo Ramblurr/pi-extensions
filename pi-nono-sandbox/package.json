@@ -14,9 +14,6 @@
   "pi": {
     "extensions": [
       "./index.ts"
-    ],
-    "skills": [
-      "./skills"
     ]
   },
   "files": [

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 
 const DENIAL_PATTERNS = [
@@ -39,6 +41,8 @@ function insideNono(): boolean {
 	return Boolean(process.env.NONO_CAP_FILE);
 }
 
+const SKILLS_DIR = join(dirname(fileURLToPath(import.meta.url)), "skills");
+
 function textFromEvent(event: ToolResultEvent): string {
 	return event.content
 		.filter((item) => item.type === "text")
@@ -53,6 +57,11 @@ function looksLikeDenial(event: ToolResultEvent): boolean {
 }
 
 export default function (pi: ExtensionAPI) {
+	if (!insideNono()) return;
+
+	pi.on("resources_discover", async () => ({
+		skillPaths: [SKILLS_DIR],
+	}));
 	pi.on("session_start", async (_event, ctx) => {
 		if (insideNono() && ctx.hasUI) {
 			ctx.ui.setStatus("nono", "nono sandbox");
