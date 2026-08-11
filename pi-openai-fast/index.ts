@@ -21,7 +21,7 @@ const SUPPORTED_MODELS = new Set([
 const SUPPORTED_MODELS_LABEL = "gpt-5.4, gpt-5.5, gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna";
 
 const DEFAULT_CONFIG: OpenAIFastConfig = {
-	enabled: true,
+	enabled: false,
 	showStatus: true,
 };
 
