@@ -1,0 +1,30 @@
+{
+  "name": "@ramblurr/pi-nono-sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Teach Pi to diagnose nono sandbox denials and prepare validated profile drafts",
+  "license": "Apache-2.0",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "nono",
+    "sandbox"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "skills",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
