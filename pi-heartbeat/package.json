@@ -1,0 +1,29 @@
+{
+  "name": "@ramblurr/pi-heartbeat",
+  "version": "0.1.0",
+  "description": "Prompt the current Pi agent after a period of continuous idle time",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "heartbeat",
+    "scheduling"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "test": "bun test test/index.test.ts"
+  }
+}
