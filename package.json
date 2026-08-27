@@ -1,0 +1,17 @@
+{
+  "name": "@ramblurr/pi-extensions",
+  "private": true,
+  "pi": {
+    "extensions": [
+      "brepl-balance/index.ts",
+      "pi-ghost/index.ts",
+      "pi-heartbeat/index.ts",
+      "pi-link-control/index.ts",
+      "pi-nono-sandbox/index.ts",
+      "pi-openai-fast/index.ts",
+      "pi-setup-tools-and-skills/index.ts",
+      "pi-sexp-edit/index.ts",
+      "reload/index.ts"
+    ]
+  }
+}
