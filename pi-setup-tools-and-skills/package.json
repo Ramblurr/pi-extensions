@@ -1,0 +1,35 @@
+{
+  "name": "@ramblurr/pi-extension-setup-tools-and-skills",
+  "version": "0.1.0",
+  "description": "Interactive project-local exclusion lists for Pi tools and skills",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "tools",
+    "skills"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ramblurr/pi-extensions.git",
+    "directory": "pi-setup-tools-and-skills"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "scripts": {
+    "test": "bun test test/index.test.ts"
+  }
+}
