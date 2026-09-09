@@ -17,8 +17,9 @@ const SUPPORTED_MODELS = new Set([
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
+	"gpt-6-astra",
 ]);
-const SUPPORTED_MODELS_LABEL = "gpt-5.4, gpt-5.5, gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna";
+const SUPPORTED_MODELS_LABEL = "gpt-5.4, gpt-5.5, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-6-astra";
 
 const DEFAULT_CONFIG: OpenAIFastConfig = {
 	enabled: false,
@@ -263,7 +264,7 @@ export default function openAIFastExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("fast", {
-		description: "Toggle OpenAI Codex Fast mode for ChatGPT-auth GPT-5.4, GPT-5.5, and GPT-5.6 Codex variants",
+		description: "Toggle OpenAI Codex Fast mode for eligible ChatGPT-auth models",
 		getArgumentCompletions: () => null,
 		handler: async (args, ctx) => {
 			const state = getState(ctx);

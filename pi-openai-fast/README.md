@@ -1,6 +1,6 @@
 # openai-fast
 
-A pi extension that enables OpenAI Codex Fast mode for ChatGPT-auth GPT-5.4, GPT-5.5, and GPT-5.6 Codex variants (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`).
+A pi extension that enables OpenAI Codex Fast mode for ChatGPT-auth GPT-5.4, GPT-5.5, GPT-5.6 Codex variants (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`), and GPT-6 Astra (`gpt-6-astra`).
 
 When active, the extension injects this into eligible OpenAI Codex request payloads:
 
@@ -10,7 +10,9 @@ When active, the extension injects this into eligible OpenAI Codex request paylo
 }
 ```
 
-The user-facing feature is OpenAI Codex **Fast mode**. The wire value is `priority` because current Codex clients map Fast mode to the OpenAI priority service tier.
+The user-facing feature is OpenAI Codex **Fast mode**. The extension retains the wire value `priority`; OpenAI's [Fast mode guide](https://developers.openai.com/api/docs/guides/priority-processing) documents `priority` and `fast` as equivalent for supported models.
+
+OpenAI's [Codex speed guide](https://developers.openai.com/codex/speed) confirms GPT-6 Astra Fast mode with ChatGPT sign-in where available, at 2.5× Standard credit consumption.
 
 ## Eligibility
 
@@ -18,7 +20,7 @@ Fast mode is only injected when all of these are true:
 
 - The current provider is `openai-codex`.
 - The current API is `openai-codex-responses`.
-- The current model is `gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`, or `gpt-5.6-luna`.
+- The current model is `gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, or `gpt-6-astra`.
 - The provider is using ChatGPT OAuth/subscription auth, not API-key auth.
 - The request payload does not already include `service_tier`.
 
