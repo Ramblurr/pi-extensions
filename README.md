@@ -12,6 +12,7 @@ Extensions and tools for [pi](https://github.com/earendil-works/pi), the termina
 | [reload](reload) | Gives agents a tool that reloads Pi extensions and other runtime resources |
 | [pi-link-control](pi-link-control) | Lets agents connect to, rename on, and disconnect from Pi Link |
 | [pi-openai-fast](pi-openai-fast) | Enables OpenAI Codex Fast mode for eligible ChatGPT-auth models |
+| [pi-subq](pi-subq) | SubQ Snap text and image decisions through codemode |
 | [pi-nono-sandbox](pi-nono-sandbox) | Diagnoses nono sandbox denials and prepares validated profile drafts |
 | [pi-setup-tools-and-skills](pi-setup-tools-and-skills) | Manages project-local tool and skill exclusions from interactive lists |
 

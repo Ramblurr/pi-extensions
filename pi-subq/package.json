@@ -1,0 +1,30 @@
+{
+  "name": "@ramblurr/pi-subq",
+  "version": "0.1.0",
+  "description": "SubQ Snap text and image decisions through Pi codemode.",
+  "type": "module",
+  "keywords": ["pi-package", "subq", "classifier"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ramblurr/pi-extensions.git",
+    "directory": "pi-subq"
+  },
+  "files": ["index.ts", "README.md"],
+  "pi": { "extensions": ["index.ts"] },
+  "scripts": {
+    "test": "node --test index.test.ts",
+    "typecheck": "tsc --noEmit --strict --skipLibCheck --module nodenext --target es2022 --allowImportingTsExtensions index.ts index.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": { "node": ">=22.19.0" }
+}

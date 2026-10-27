@@ -11,6 +11,7 @@
       "pi-openai-fast/index.ts",
       "pi-setup-tools-and-skills/index.ts",
       "pi-sexp-edit/index.ts",
+      "pi-subq/index.ts",
       "reload/index.ts"
     ]
   }
