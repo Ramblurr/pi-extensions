@@ -1,6 +1,6 @@
 # openai-fast
 
-A pi extension that enables OpenAI Codex Fast mode for ChatGPT-auth GPT-5.4, GPT-5.5, GPT-5.6 Codex variants (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`), and GPT-6 Astra (`gpt-6-astra`).
+A pi extension that enables OpenAI Codex Fast mode for supported ChatGPT-auth GPT models (listed below).
 
 When active, the extension injects this into eligible OpenAI Codex request payloads:
 
@@ -20,9 +20,11 @@ Fast mode is only injected when all of these are true:
 
 - The current provider is `openai-codex`.
 - The current API is `openai-codex-responses`.
-- The current model is `gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, or `gpt-6-astra`.
+- The current model is `gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-6.1-sol`, or `gpt-6.1-terra`.
 - The provider is using ChatGPT OAuth/subscription auth, not API-key auth.
 - The request payload does not already include `service_tier`.
+
+The GPT-6 Sol/Luna and GPT-6.1 Sol/Terra additions are verified against OpenAI's [Codex model catalog](https://github.com/openai/codex/blob/f752c97f7d0be0cbef5cece327f52a16ad6fb1c6/codex-rs/models-manager/models.json), which advertises `priority` as their Fast tier. Daybreak Blue/Red advertise no Fast tier and remain excluded.
 
 ## Commands
 
@@ -32,7 +34,7 @@ Fast mode is only injected when all of these are true:
 
 Run `/fast` to toggle Fast mode on or off for the current session/runtime. The command reports the new state in chat, and the footer shows `⚡` while Fast mode is active for an eligible model.
 
-The extension defaults to on for new sessions; set `"enabled": false` in the config file or run `/fast` to turn it off.
+The extension defaults to off for new sessions; set `"enabled": true` in the config file or run `/fast` to turn it on.
 
 ### CLI flag
 
@@ -67,7 +69,7 @@ Here `<pi-config-dir>` is Pi's runtime config directory name (`CONFIG_DIR_NAME`;
 }
 ```
 
-- `enabled`: default Fast-mode state when there is no session override (defaults to `true`).
+- `enabled`: default Fast-mode state when there is no session override (defaults to `false`).
 - `showStatus`: show a compact `⚡` status when Fast mode is active for the current model.
 
 ## Install
