@@ -13,6 +13,7 @@ Extensions and tools for [pi](https://github.com/earendil-works/pi), the termina
 | [pi-link-control](pi-link-control) | Lets agents connect to, rename on, and disconnect from Pi Link |
 | [pi-openai-fast](pi-openai-fast) | Enables OpenAI Codex Fast mode for eligible ChatGPT-auth models |
 | [pi-subq](pi-subq) | SubQ Snap text and image decisions through codemode |
+| [pi-speak](pi-speak) | Local Kokoro and streaming ElevenLabs v4/v4 Turbo speech, with voice browsing, search, filters, and opt-in previews |
 | [pi-nono-sandbox](pi-nono-sandbox) | Diagnoses nono sandbox denials and prepares validated profile drafts |
 | [pi-setup-tools-and-skills](pi-setup-tools-and-skills) | Manages project-local tool and skill exclusions from interactive lists |
 
@@ -29,3 +30,8 @@ pi install npm:@ramblurr/<package-name>
 ```
 
 See each package's README for setup and usage.
+
+`pi-speak` is currently a private, local-load package, not an npm release. Its
+[setup guide](pi-speak/README.md#try-without-installing-globally) covers loading
+it from this checkout, configuring providers and credentials, and using the
+voice browser. It is not enabled by the root extension manifest.
