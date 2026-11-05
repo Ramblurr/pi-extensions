@@ -34,10 +34,11 @@ export async function generatePreprocessedText(
   raw: string,
   prompt: string,
   model: unknown,
-  _ctx: ExtensionContext,
+  ctx: ExtensionContext,
   deps: PreprocessingDeps = {},
 ): Promise<string | null> {
   try {
+    ctx.signal?.throwIfAborted();
     const userMessage = buildPreprocessingUserMessage(raw);
 
     const loader = deps.createLoader
@@ -68,7 +69,10 @@ export async function generatePreprocessedText(
       resourceLoader: loader,
     });
 
+    const abort = (): void => { void session.abort(); };
+    ctx.signal?.addEventListener("abort", abort, { once: true });
     try {
+      ctx.signal?.throwIfAborted();
       let responseText = "";
 
       const unsub = session.subscribe((event: unknown) => {
@@ -83,12 +87,14 @@ export async function generatePreprocessedText(
         }
       });
 
-      await session.prompt(userMessage);
-      unsub();
+      try { await session.prompt(userMessage); }
+      finally { unsub(); }
+      ctx.signal?.throwIfAborted();
 
       const trimmed = responseText.trim();
       return trimmed.length > 0 ? trimmed : null;
     } finally {
+      ctx.signal?.removeEventListener("abort", abort);
       session.dispose();
     }
   } catch {

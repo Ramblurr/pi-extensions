@@ -1,133 +1,63 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { PiSpeakSettings } from "./settings.js";
-import { STATUS_WIDGET_KEY } from "./shortcut-core.js";
-import type { SynthesisService } from "./synthesis-service.js";
-import type { AudioQueue } from "./audio.js";
+import type { PiSpeakRuntime } from "./runtime.js";
+import type { SpeechRequest } from "./speech-provider.js";
 
-const MIN_SPEED = 0.5;
-const MAX_SPEED = 3.0;
+type SpeakToolOptions = { getRuntime: () => Promise<PiSpeakRuntime> };
+export type SpeakToolController = { refresh(): Promise<void>; shutdown(): Promise<void> };
 
-type SpeakToolOptions = {
-  getSettings: () => Promise<PiSpeakSettings>;
-  getService: () => Promise<SynthesisService>;
-  getAudioQueue: () => Promise<AudioQueue>;
-};
-
-export type SpeakToolController = {
-  shutdown(): Promise<void>;
-};
-
-export function registerSpeakTool(
-  pi: ExtensionAPI,
-  options: SpeakToolOptions,
-): SpeakToolController {
+export function registerSpeakTool(pi: ExtensionAPI, options: SpeakToolOptions): SpeakToolController {
   let shuttingDown = false;
-  const operations = new Set<Promise<unknown>>();
-  const shutdownController = new AbortController();
 
-  function track<T>(operation: Promise<T>): Promise<T> {
-    const tracked = operation.finally(() => {
-      operations.delete(tracked);
+  async function refresh(): Promise<void> {
+    const runtime = await options.getRuntime();
+    const configuration = await runtime.getConfiguration();
+    const { describeProvider } = await import("./speech-providers.js");
+    const description = describeProvider(configuration);
+    pi.registerTool({
+      name: "speak", label: "Speak", description: description.description,
+      promptSnippet: description.description,
+      promptGuidelines: ["Use speak when the user wants to hear text aloud.", ...description.guidelines],
+      parameters: description.parameters,
+      async execute(_id, parameters, signal, _update, ctx) {
+        if (shuttingDown) throw new Error("pi-speak is shutting down");
+        await runtime.speak(parameters as SpeechRequest, ctx, signal);
+        return { content: [{ type: "text", text: "Speech playback completed." }], details: { provider: configuration?.provider ?? "kokoro" } };
+      },
     });
-    operations.add(tracked);
-    return tracked;
   }
 
   pi.registerTool({
-    name: "speak",
-    label: "Speak",
-    description: "Convert text to speech via local Kokoro TTS and play audio",
-    promptSnippet: "Speak text aloud with local Kokoro TTS",
-    promptGuidelines: [
-      "Use speak when the user wants to hear text spoken aloud.",
-      "speak queues synthesis and playback; multiple calls play serially.",
-    ],
+    name: "speech_options", label: "Speech options",
+    description: "Inspect the selected speech provider's controls and defaults. Supply query to search voices; use nextPage to continue results.",
     parameters: Type.Object({
-      text: Type.String({ description: "Text to speak" }),
-      voice: Type.Optional(Type.String({ description: "Voice id, defaults to configured" })),
-      speed: Type.Optional(
-        Type.Number({ description: "Speed 0.5-3.0", minimum: MIN_SPEED, maximum: MAX_SPEED }),
-      ),
-    }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx: ExtensionContext) {
+      query: Type.Optional(Type.String({ description: "Search voices; empty string lists voices" })),
+      nextPage: Type.Optional(Type.String({ description: "Voice page token from a previous result; retain the same query" })),
+    }, { additionalProperties: false }),
+    async execute(_id, parameters, signal) {
       if (shuttingDown) throw new Error("pi-speak is shutting down");
-      const operationSignal = signal
-        ? AbortSignal.any([signal, shutdownController.signal])
-        : shutdownController.signal;
-
-      return track(
-        (async () => {
-          operationSignal.throwIfAborted();
-          const rawText = params.text?.trim();
-          if (!rawText) throw new Error("Missing or empty 'text' field");
-          const { cleanTextForSpeech } = await import("./text.js");
-          const cleanedPreview = cleanTextForSpeech(rawText);
-          if (!cleanedPreview) throw new Error("Missing or empty 'text' field");
-
-          const configured = await options.getSettings();
-          const voice = params.voice ?? configured.voice;
-          const speed = params.speed ?? configured.speed;
-
-          if (speed < MIN_SPEED || speed > MAX_SPEED) {
-            throw new Error(`Speed must be between ${MIN_SPEED} and ${MAX_SPEED}`);
-          }
-
-          const effectiveSettings: PiSpeakSettings = { ...configured, voice, speed };
-
-          const hasUI = ctx.hasUI;
-          if (hasUI) {
-            ctx.ui.setWidget(STATUS_WIDGET_KEY, [
-              ctx.ui.theme.fg("muted", "Synthesizing…"),
-            ]);
-          }
-
-          let wavBuffer: Buffer;
-          try {
-            const service = await options.getService();
-            wavBuffer = await service.synthesize(effectiveSettings, cleanedPreview, operationSignal);
-            operationSignal.throwIfAborted();
-          } finally {
-            if (hasUI) ctx.ui.setWidget(STATUS_WIDGET_KEY, undefined);
-          }
-
-          const directory = await mkdtemp(join(tmpdir(), "pi-speak-"));
-          const outPath = join(directory, `speak-${process.pid}-${Date.now()}.wav`);
-          await writeFile(outPath, wavBuffer);
-
-          const audioQueue = await options.getAudioQueue();
-          const { playWav } = await import("./audio.js");
-          audioQueue.enqueue({
-            play: async () => {
-              try {
-                await playWav(outPath);
-              } finally {
-                await unlink(outPath).catch(() => undefined);
-                await rm(directory, { recursive: true, force: true }).catch(() => undefined);
-              }
-            },
-          });
-
-          const preview = rawText.length > 80 ? `${rawText.slice(0, 80)}…` : rawText;
-          return {
-            content: [
-              { type: "text" as const, text: `Speaking: "${preview}" (voice ${voice}, speed ${speed})` },
-            ],
-            details: { voice, speed, textLength: rawText.length },
-          };
-        })(),
-      );
+      const configuration = await (await options.getRuntime()).getConfiguration();
+      const { describeProvider, searchProviderVoices } = await import("./speech-providers.js");
+      const description = describeProvider(configuration);
+      const result = {
+        provider: configuration?.provider ?? "kokoro",
+        defaults: configuration?.provider === "elevenlabs" ? {
+          model: configuration.providers.elevenlabs?.model, voice: configuration.providers.elevenlabs?.voice,
+          stability: configuration.providers.elevenlabs?.stability, similarity: configuration.providers.elevenlabs?.similarity,
+        } :
+          configuration?.providers.kokoro ? {
+            model: configuration.providers.kokoro.model.id,
+            voice: configuration.providers.kokoro.voice, speed: configuration.providers.kokoro.speed,
+          } : undefined,
+        delivery: configuration?.provider === "elevenlabs" ? "streaming" : "buffered",
+        parameters: description.parameters,
+        guidance: description.guidelines,
+        ...(configuration && (parameters.query !== undefined || parameters.nextPage !== undefined)
+          ? await searchProviderVoices(configuration, parameters.query, parameters.nextPage, signal) : {}),
+      };
+      return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
     },
   });
 
-  return {
-    async shutdown() {
-      shuttingDown = true;
-      shutdownController.abort(new Error("pi-speak is shutting down"));
-      await Promise.allSettled([...operations]);
-    },
-  };
+  return { refresh, async shutdown() { shuttingDown = true; } };
 }

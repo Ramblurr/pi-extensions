@@ -262,9 +262,9 @@ type PreprocessingPickerResult = {
   preprocessingModel?: { provider: string; id: string };
 };
 
-async function choosePreprocessingModel(
+export async function choosePreprocessingModel(
   ctx: ExtensionContext,
-  configured: PiSpeakSettings,
+  configured: Pick<PiSpeakSettings, "preprocessingEnabled" | "preprocessingModel">,
 ): Promise<PreprocessingPickerResult | undefined> {
   // Refresh registry on open with abort controller (15s timeout like ModelSelectorComponent)
   const refreshAbort = new AbortController();
@@ -539,6 +539,7 @@ export async function showSpeakSettings(
   _pi: ExtensionAPI,
   ctx: ExtensionContext,
   configured: PiSpeakSettings,
+  persist: (settings: PiSpeakSettings) => Promise<void> = writeSettings,
 ): Promise<boolean> {
   while (true) {
     const model = getCatalogModel(configured.model.id);
@@ -565,7 +566,7 @@ export async function showSpeakSettings(
       const voice = await chooseVoice(ctx, configured.voice);
       if (!voice || voice === configured.voice) continue;
       const updated: PiSpeakSettings = { ...configured, voice };
-      await writeSettings(updated);
+      await persist(updated);
       Object.assign(configured, updated);
       ctx.ui.notify(`Voice saved as ${voice}${voiceHint(voice) ? ` (${voiceHint(voice)})` : ""}`, "info");
       continue;
@@ -574,7 +575,7 @@ export async function showSpeakSettings(
       const speed = await chooseSpeed(ctx, configured.speed);
       if (speed === undefined || speed === configured.speed) continue;
       const updated: PiSpeakSettings = { ...configured, speed };
-      await writeSettings(updated);
+      await persist(updated);
       Object.assign(configured, updated);
       ctx.ui.notify(`Speed saved as ${speed}`, "info");
       continue;
@@ -587,6 +588,7 @@ export async function showSpeakSettings(
         preprocessingEnabled: configured.preprocessingEnabled,
         preprocessingModel: configured.preprocessingModel,
         preprocessingPrompt: configured.preprocessingPrompt,
+        persist,
       });
       if (changed) Object.assign(configured, changed);
       continue;
@@ -604,13 +606,13 @@ export async function showSpeakSettings(
       if (!result.preprocessingEnabled) {
         updated = { ...configured, preprocessingEnabled: false };
         delete (updated as unknown as { preprocessingModel?: unknown }).preprocessingModel;
-        await writeSettings(updated);
+        await persist(updated);
         configured.preprocessingEnabled = false;
         delete (configured as unknown as { preprocessingModel?: unknown }).preprocessingModel;
         ctx.ui.notify("Preprocessing disabled", "info");
       } else {
         updated = { ...configured, preprocessingEnabled: true, preprocessingModel: newModel! };
-        await writeSettings(updated);
+        await persist(updated);
         configured.preprocessingEnabled = true;
         configured.preprocessingModel = newModel;
         ctx.ui.notify(`Preprocessing LLM saved as ${newModel!.provider}/${newModel!.id}`, "info");

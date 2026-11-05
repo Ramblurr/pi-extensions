@@ -59,7 +59,7 @@ function defaultVoiceForModel(_model: CatalogModel): string {
   return DEFAULT_VOICE;
 }
 
-function validateSettings(value: unknown): PiSpeakSettings | undefined {
+export function validateSettings(value: unknown): PiSpeakSettings | undefined {
   if (!isObject(value) || value.version !== SETTINGS_VERSION) return undefined;
   if (!isObject(value.backend) || value.backend.type !== "kokoro") return undefined;
 

@@ -16,7 +16,7 @@ export default function piSpeak(pi: ExtensionAPI): void {
     if (runtimePromise) return runtimePromise;
 
     const loading = import("./runtime.js").then(({ createPiSpeakRuntime }) =>
-      createPiSpeakRuntime(pi),
+      createPiSpeakRuntime(pi, { onConfigurationChanged: () => speakTool.refresh() }),
     );
     runtimePromise = loading;
     void loading.catch(() => {
@@ -25,10 +25,19 @@ export default function piSpeak(pi: ExtensionAPI): void {
     return loading;
   }
 
-  const speakTool = registerSpeakTool(pi, {
-    getSettings: async () => (await loadRuntime()).requireConfiguredSettingsForTool(),
-    getService: async () => (await loadRuntime()).service,
-    getAudioQueue: async () => (await loadRuntime()).audioQueue,
+  const speakTool = registerSpeakTool(pi, { getRuntime: loadRuntime });
+
+  pi.on("session_start", async (_event, ctx) => {
+    try { await speakTool.refresh(); }
+    catch (error) { if (ctx.hasUI) ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
+  });
+
+  pi.registerCommand("speak-stop", {
+    description: "Stop speech and clear queued utterances",
+    handler: async (_args, ctx) => {
+      if (runtimePromise) await (await runtimePromise).stop();
+      if (ctx.hasUI) ctx.ui.setWidget(STATUS_WIDGET_KEY, undefined);
+    },
   });
 
   pi.registerShortcut("ctrl+alt+x" as Parameters<ExtensionAPI["registerShortcut"]>[0], {
@@ -52,7 +61,7 @@ export default function piSpeak(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("speak", {
-    description: "Configure voice and speed for pi-speak",
+    description: "Configure speech provider, voice and delivery settings",
     handler: async (_args, ctx) => (await loadRuntime()).showSettings(ctx),
   });
 

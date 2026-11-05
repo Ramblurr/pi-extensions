@@ -22,6 +22,7 @@ type ModelSelectionOptions = {
   preprocessingModel?: { provider: string; id: string };
   preprocessingPrompt?: string;
   continueAfterSelection?: boolean;
+  persist?: (settings: PiSpeakSettings) => Promise<void>;
 };
 
 export async function runModelSelection(
@@ -134,7 +135,7 @@ export async function runModelSelection(
         preprocessingModel: configured?.preprocessingModel ?? options.preprocessingModel,
         preprocessingPrompt: configured?.preprocessingPrompt ?? options.preprocessingPrompt,
       });
-      await writeSettings(settings);
+      await (options.persist ?? writeSettings)(settings);
       configured = settings;
       currentModelId = selected.id;
     });
@@ -153,7 +154,8 @@ export async function runModelSelection(
 
 export async function runOnboarding(
   ctx: ExtensionContext,
+  persist: (settings: PiSpeakSettings) => Promise<void> = writeSettings,
 ): Promise<PiSpeakSettings | undefined> {
   if (!requireTui(ctx)) return undefined;
-  return runModelSelection(ctx, { continueAfterSelection: true });
+  return runModelSelection(ctx, { continueAfterSelection: true, persist });
 }

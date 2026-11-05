@@ -3,13 +3,18 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createPiSpeakRuntime } from "../src/runtime.js";
+import { createPiSpeakRuntime as createRuntime } from "../src/runtime.js";
 import { settingsForModel, writeSettings } from "../src/settings.js";
 import { CATALOG_MODELS } from "../src/catalog.js";
 import { DEFAULT_PREPROCESSING_PROMPT } from "../src/text.js";
 import { deferred, nextTurn } from "./helpers.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { PiSpeakSettings } from "../src/settings.js";
+
+// Preprocessing tests isolate the speaker device; playback has its own integration tests.
+function createPiSpeakRuntime(pi: Parameters<typeof createRuntime>[0], options: Parameters<typeof createRuntime>[1]) {
+  return createRuntime(pi, { ...options, playAudio: async () => {} });
+}
 
 function createFakeSynthesisService() {
   const calls: Array<{ settings: PiSpeakSettings; text: string }> = [];
