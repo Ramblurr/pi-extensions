@@ -1,0 +1,59 @@
+{
+  "name": "@s1m0n38/pi-speak",
+  "version": "0.0.1",
+  "description": "Local text-to-speech for Pi",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/s1m0n38/pi-speak.git"
+  },
+  "homepage": "https://github.com/s1m0n38/pi-speak#readme",
+  "bugs": {
+    "url": "https://github.com/s1m0n38/pi-speak/issues"
+  },
+  "private": true,
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "tts",
+    "text-to-speech",
+    "kokoro"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "npm run check && node scripts/run-tests.mjs",
+    "prepublishOnly": "npm test",
+    "catalog:generate": "node scripts/generate-catalog.mjs",
+    "catalog:verify": "node scripts/verify-catalog.mjs"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.83.0",
+    "@earendil-works/pi-tui": "^0.83.0",
+    "@types/node": "22.20.1",
+    "typebox": "^1.3.7",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "@huggingface/hub": "2.15.0",
+    "kokoro-js": "^1.2.1"
+  }
+}
