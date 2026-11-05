@@ -1,16 +1,17 @@
 {
-  "name": "@s1m0n38/pi-speak",
+  "name": "@ramblurr/pi-speak",
   "version": "0.0.1",
   "description": "Local text-to-speech for Pi",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/s1m0n38/pi-speak.git"
+    "url": "git+https://github.com/ramblurr/pi-extensions.git",
+    "directory": "pi-speak"
   },
-  "homepage": "https://github.com/s1m0n38/pi-speak#readme",
+  "homepage": "https://github.com/ramblurr/pi-extensions/tree/main/pi-speak#readme",
   "bugs": {
-    "url": "https://github.com/s1m0n38/pi-speak/issues"
+    "url": "https://github.com/ramblurr/pi-extensions/issues"
   },
   "private": true,
   "files": [
@@ -30,8 +31,8 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "npm run check && node scripts/run-tests.mjs",
-    "prepublishOnly": "npm test",
+    "test": "tsc --noEmit && node scripts/run-tests.mjs",
+    "prepublishOnly": "pnpm test",
     "catalog:generate": "node scripts/generate-catalog.mjs",
     "catalog:verify": "node scripts/verify-catalog.mjs"
   },
@@ -54,6 +55,7 @@
   },
   "dependencies": {
     "@huggingface/hub": "2.15.0",
+    "@huggingface/transformers": "3.8.1",
     "kokoro-js": "^1.2.1"
   }
 }

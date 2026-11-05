@@ -1,23 +1,33 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { accessSync, constants } from "node:fs";
+import { delimiter, join } from "node:path";
+
+function isExecutable(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export const AUDIO_PLAYBACK_TIMEOUT_MS = 5 * 60 * 1000;
 
 export function getAudioPlayer(
   platform: NodeJS.Platform = process.platform,
-  exists: (path: string) => boolean = existsSync,
+  exists: (path: string) => boolean = isExecutable,
 ): string {
   if (platform === "darwin") {
     return exists("/usr/bin/afplay") ? "/usr/bin/afplay" : "afplay";
   }
-  const candidates = [
-    "/usr/bin/pw-play",
-    "/usr/local/bin/pw-play",
-    "/usr/bin/paplay",
-    "/usr/local/bin/paplay",
-    "/usr/bin/aplay",
-    "/usr/local/bin/aplay",
-  ];
+  const directories = [...new Set([
+    ...(process.env.PATH ?? "").split(delimiter).filter(Boolean),
+    "/usr/bin",
+    "/usr/local/bin",
+  ])];
+  const candidates = ["pw-play", "paplay", "aplay"].flatMap((player) =>
+    directories.map((directory) => join(directory, player)),
+  );
   for (const cmd of candidates) {
     if (exists(cmd)) return cmd;
   }

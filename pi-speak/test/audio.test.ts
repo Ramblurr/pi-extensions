@@ -28,6 +28,20 @@ test("getAudioPlayer", async (t) => {
     assert.equal(getAudioPlayer("linux", exists), "/usr/bin/aplay");
   });
 
+  await t.test("linux finds PipeWire in the NixOS PATH before ALSA", () => {
+    const previous = process.env.PATH;
+    try {
+      process.env.PATH = "/run/current-system/sw/bin";
+      const exists = (p: string) => [
+        "/run/current-system/sw/bin/pw-play", "/usr/bin/aplay",
+      ].includes(p);
+      assert.equal(getAudioPlayer("linux", exists), "/run/current-system/sw/bin/pw-play");
+    } finally {
+      if (previous === undefined) delete process.env.PATH;
+      else process.env.PATH = previous;
+    }
+  });
+
   await t.test("linux returns aplay when nothing exists", () => {
     assert.equal(getAudioPlayer("linux", () => false), "aplay");
   });
