@@ -23,6 +23,7 @@ export interface SpeechProvider {
 
 export type ElevenLabsConfig = {
   apiKey?: string;
+  voiceName?: string;
   model: "eleven_v4" | "eleven_v4_turbo";
   voice: string;
   stability: number;
@@ -38,4 +39,5 @@ export type SpeechToolDescription = {
   parameters: TObject;
   description: string;
   guidelines: string[];
+  example: SpeechRequest;
 };

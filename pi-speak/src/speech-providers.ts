@@ -4,13 +4,22 @@ import { elevenLabsDescription, kokoroDescription, validateSpeechRequest } from 
 import type { SpeechProvider, SpeechToolDescription, VoicePage } from "./speech-provider.js";
 import type { SynthesisService } from "./synthesis-service.js";
 
+export function providerDefaults(configuration?: SpeechConfiguration) {
+  if (configuration?.provider === "elevenlabs") {
+    const cloud = configuration.providers.elevenlabs;
+    return cloud ? { model: cloud.model, voice: cloud.voice, stability: cloud.stability, similarity: cloud.similarity } : undefined;
+  }
+  const local = configuration?.providers.kokoro;
+  return local ? { model: local.model.id, voice: local.voice, speed: local.speed } : undefined;
+}
+
 export function describeProvider(configuration?: SpeechConfiguration): SpeechToolDescription {
   const cloud = configuration?.provider === "elevenlabs";
   const base = cloud ? elevenLabsDescription : kokoroDescription;
-  const settings = cloud ? configuration?.providers.elevenlabs : configuration?.providers.kokoro;
+  const defaults = providerDefaults(configuration);
   return {
     ...base,
-    description: base.description + (settings ? ` Default voice: ${settings.voice}.` : " Run /speak to configure speech."),
+    description: base.description + (defaults ? ` Configured defaults: ${JSON.stringify(defaults)}.` : " Run /speak to configure speech."),
   };
 }
 

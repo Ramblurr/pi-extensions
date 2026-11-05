@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { readConfiguration, writeConfiguration, type SpeechConfiguration } from "./configuration.js";
-import { searchElevenLabsVoices } from "./elevenlabs.js";
+import { getElevenLabsVoice, searchElevenLabsVoices } from "./elevenlabs.js";
 import { runModelSelection, runOnboarding } from "./onboarding.js";
 import { stat } from "node:fs/promises";
 import { isApiKeySource, resolveElevenLabsKey } from "./credentials.js";
@@ -18,15 +18,26 @@ async function chooseApiKeySource(ctx: ExtensionCommandContext, current = "$ELEV
   }
 }
 
-async function chooseCloudVoice(ctx: ExtensionCommandContext, cloud: ElevenLabsConfig): Promise<string | undefined> {
-  const method = await ctx.ui.select("ElevenLabs voice", ["Enter voice ID", "Search account voices"]);
+async function lookupVoiceName(cloud: ElevenLabsConfig): Promise<string | undefined> {
+  try {
+    return (await getElevenLabsVoice(cloud.voice, undefined, { apiKey: () => resolveElevenLabsKey(cloud) })).name;
+  } catch {
+    // Name discovery is optional: missing credentials/permissions must not block editing.
+    return undefined;
+  }
+}
+
+async function chooseCloudVoice(ctx: ExtensionCommandContext, cloud: ElevenLabsConfig): Promise<Pick<ElevenLabsConfig, "voice" | "voiceName"> | undefined> {
+  const method = await ctx.ui.select("ElevenLabs voice", ["Browse account voices", "Search account voices", "Enter voice ID"]);
   if (method === "Enter voice ID") {
     const voice = (await ctx.ui.input("ElevenLabs voice ID", cloud.voice))?.trim();
     if (voice === "") ctx.ui.notify("Enter a nonempty voice ID.", "error");
-    return voice || undefined;
+    if (!voice) return undefined;
+    const voiceName = await lookupVoiceName({ ...cloud, voice });
+    return voiceName ? { voice, voiceName } : { voice };
   }
-  if (method !== "Search account voices") return undefined;
-  const query = await ctx.ui.input("Search account voices", "Name or description (blank lists voices)");
+  if (method !== "Search account voices" && method !== "Browse account voices") return undefined;
+  const query = method === "Browse account voices" ? "" : await ctx.ui.input("Search account voices", "Name or description");
   if (query === undefined) return undefined;
   let nextPage: string | undefined;
   do {
@@ -35,12 +46,15 @@ async function chooseCloudVoice(ctx: ExtensionCommandContext, cloud: ElevenLabsC
     const more = "Next page";
     if (page.nextPage) labels.push(more);
     if (labels.length === 0) {
-      ctx.ui.notify("No matching voices. Try another search or enter a voice ID.", "info");
-      return undefined;
+      ctx.ui.notify("No matching voices. Choose Browse account voices, try another search, or enter a voice ID.", "info");
+      return chooseCloudVoice(ctx, cloud);
     }
     const selected = await ctx.ui.select("Account voices", labels);
     if (!selected) return undefined;
-    if (selected !== more) return page.voices[labels.indexOf(selected)]?.id;
+    if (selected !== more) {
+      const voice = page.voices[labels.indexOf(selected)];
+      return voice ? { voice: voice.id, voiceName: voice.name } : undefined;
+    }
     nextPage = page.nextPage;
   } while (nextPage);
   return undefined;
@@ -135,13 +149,16 @@ export async function showProviderSettings(
       cloud = { model: "eleven_v4", voice: "", stability: 0.5, similarity: 0.75, apiKey };
       const voice = await chooseCloudVoice(ctx, cloud);
       if (!voice) return configuration;
-      cloud.voice = voice;
+      Object.assign(cloud, voice);
       draft.providers.elevenlabs = cloud;
+    } else if (!cloud.voiceName) {
+      const name = await lookupVoiceName(cloud);
+      if (name) cloud.voiceName = name;
     }
     while (true) {
       const apiKeyChoice = `API key source · ${cloud.apiKey ?? "$ELEVENLABS_API_KEY"}`;
       const modelChoice = `Model · ${cloud.model}`;
-      const voiceChoice = `Voice · ${cloud.voice}`;
+      const voiceChoice = `Voice · ${cloud.voiceName ?? "name unavailable"} · ${cloud.voice}`;
       const stabilityChoice = `Stability · ${cloud.stability}`;
       const similarityChoice = `Similarity · ${cloud.similarity}`;
       const preprocessingChoice = `Preprocessing LLM · ${draft.preprocessingEnabled && draft.preprocessingModel ? `${draft.preprocessingModel.provider}/${draft.preprocessingModel.id}` : "off"}`;
@@ -159,7 +176,10 @@ export async function showProviderSettings(
         if (model === "eleven_v4" || model === "eleven_v4_turbo") cloud.model = model;
       } else if (choice === voiceChoice) {
         const voice = await chooseCloudVoice(ctx, cloud);
-        if (voice) cloud.voice = voice;
+        if (voice) {
+          delete cloud.voiceName;
+          Object.assign(cloud, voice);
+        }
       } else if (choice === stabilityChoice || choice === similarityChoice) {
         const field = choice === stabilityChoice ? "stability" : "similarity";
         const value = await chooseUnitNumber(ctx, field === "stability" ? "Stability" : "Similarity", cloud[field]);

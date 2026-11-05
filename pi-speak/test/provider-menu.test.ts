@@ -8,16 +8,19 @@ import { showProviderSettings } from "../src/provider-menu.js";
 import { readConfiguration, writeConfiguration, type SpeechConfiguration } from "../src/configuration.js";
 import { settingsForModel } from "../src/settings.js";
 import { CATALOG_MODELS } from "../src/catalog.js";
+import { getElevenLabsVoice } from "../src/elevenlabs.js";
 
 function context(answers: Array<string | undefined>, inputs: Array<string | undefined> = [], consent = true) {
   const notices: string[] = [];
   const confirmations: string[] = [];
+  const menus: Array<{ title: string; options: string[] }> = [];
   const ctx = {
     mode: "rpc", hasUI: true, scopedModels: [],
     modelRegistry: { refresh: async () => {}, getAvailable: () => [{ provider: "llm", id: "summary" }] },
     ui: {
       theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
       select: async (_title: string, options: string[]) => {
+        menus.push({ title: _title, options });
         assert.ok(answers.length, `Unexpected menu: ${_title}`);
         const answer = answers.shift();
         if (answer === undefined) return undefined;
@@ -30,7 +33,7 @@ function context(answers: Array<string | undefined>, inputs: Array<string | unde
       notify: (text: string) => notices.push(text),
     },
   } as unknown as ExtensionCommandContext;
-  return { ctx, notices, confirmations };
+  return { ctx, notices, confirmations, menus };
 }
 const pi = {} as ExtensionAPI;
 
@@ -38,6 +41,8 @@ test("provider settings UI", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "pi-speak-provider-menu-"));
   const original = process.env.PI_CODING_AGENT_DIR;
   const originalKey = process.env.ELEVENLABS_API_KEY;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("No real network in settings tests"); };
   process.env.PI_CODING_AGENT_DIR = dir;
   delete process.env.ELEVENLABS_API_KEY;
   const path = join(dir, "pi-speak.json");
@@ -66,9 +71,9 @@ test("provider settings UI", async (t) => {
       assert.equal(confirmations.length, 1);
       assert.deepEqual(notices, []);
     });
-    await t.test("first setup accepts command references without resolving them", async () => {
+    await t.test("first setup accepts command references; save alone does not resolve edited source", async () => {
       await rm(path);
-      const source = "!op read 'op://Private/ElevenLabs/api-key-quine'";
+      const source = "!printf synthetic-test-key";
       const { ctx, notices } = context(["ElevenLabs (cloud)", "Enter voice ID", "Save"], [source, "manual-id"]);
       const result = await showProviderSettings(pi, ctx);
       assert.equal(result?.providers.elevenlabs?.apiKey, source);
@@ -110,12 +115,86 @@ test("provider settings UI", async (t) => {
         const { ctx } = context(["ElevenLabs (cloud)", "Search account voices", "Next page", "Second", "Save"], ["${PI_SPEAK_TEST_SEARCH_KEY}", "narrator"]);
         const result = await showProviderSettings(pi, ctx, local);
         assert.equal(result?.providers.elevenlabs?.voice, "second-id");
+        assert.equal(result?.providers.elevenlabs?.voiceName, "Second");
+        assert.equal((await readConfiguration()).configuration?.providers.elevenlabs?.voiceName, "Second");
         assert.deepEqual(urls.map((url) => [url.searchParams.get("search"), url.searchParams.get("next_page_token")]), [["narrator", null], ["narrator", "page-2"]]);
         assert.ok(!(await readFile(path, "utf8")).includes("test-key-not-real"));
       } finally {
         globalThis.fetch = originalFetch;
         if (originalSearchKey === undefined) delete process.env.PI_SPEAK_TEST_SEARCH_KEY;
         else process.env.PI_SPEAK_TEST_SEARCH_KEY = originalSearchKey;
+      }
+    });
+    await t.test("browse lists unfiltered pages without query input and saves a recognizable name", async () => {
+      const previousFetch = globalThis.fetch;
+      process.env.ELEVENLABS_API_KEY = "synthetic-browse-key";
+      const urls: URL[] = [];
+      globalThis.fetch = async (url) => {
+        urls.push(new URL(String(url)));
+        const second = urls.length === 2;
+        return Response.json({ voices: [{ voice_id: second ? "b-id" : "a-id", name: second ? "Brian" : "Alice", description: "Narrator" }], has_more: !second, ...(!second ? { next_page_token: "next" } : {}) });
+      };
+      try {
+        await writeConfiguration(local);
+        const { ctx, menus } = context(["ElevenLabs (cloud)", "Browse account voices", "Next page", "Brian", "Save"]);
+        let inputCount = 0;
+        ctx.ui.input = async () => { assert.equal(++inputCount, 1, "only credential source input is needed"); return ""; };
+        const result = await showProviderSettings(pi, ctx, local);
+        assert.equal(result?.providers.elevenlabs?.voiceName, "Brian");
+        assert.equal((await readConfiguration()).configuration?.providers.elevenlabs?.voiceName, "Brian");
+        assert.deepEqual(urls.map((url) => [url.pathname, url.searchParams.get("search"), url.searchParams.get("next_page_token")]), [["/v2/voices", null, null], ["/v2/voices", null, "next"]]);
+        assert.ok(menus.some((menu) => menu.options.includes("Voice · Brian · b-id")));
+        assert.deepEqual(menus.find((menu) => menu.title === "ElevenLabs voice")?.options, ["Browse account voices", "Search account voices", "Enter voice ID"]);
+      } finally {
+        globalThis.fetch = previousFetch;
+        delete process.env.ELEVENLABS_API_KEY;
+      }
+    });
+    await t.test("saved ID resolves directly; manual edit replaces stale name; unavailable names stay editable", async () => {
+      const previousFetch = globalThis.fetch;
+      process.env.ELEVENLABS_API_KEY = "synthetic-lookup-key";
+      const urls: string[] = [];
+      globalThis.fetch = async (url) => {
+        urls.push(String(url));
+        const id = new URL(String(url)).pathname.split("/").at(-1);
+        if (id === "unavailable") return new Response("private response", { status: 403 });
+        return Response.json({ voice_id: id, name: id === "manual-id" ? "Brian" : "Alice" });
+      };
+      try {
+        const existing: SpeechConfiguration = { ...local, provider: "elevenlabs", providers: { elevenlabs: cloud } };
+        await writeConfiguration(existing);
+        const first = context(["ElevenLabs (cloud)", "Voice", "Enter voice ID", "Save"], ["new-id"]);
+        const changed = await showProviderSettings(pi, first.ctx, existing);
+        assert.equal(changed?.providers.elevenlabs?.voiceName, "Alice");
+        assert.ok(first.menus.some((menu) => menu.options.includes("Voice · Brian · manual-id")));
+        assert.ok(first.menus.some((menu) => menu.options.includes("Voice · Alice · new-id")));
+        assert.deepEqual(urls.map((url) => new URL(url).pathname), ["/v1/voices/manual-id", "/v1/voices/new-id"]);
+        const failed = context(["ElevenLabs (cloud)", "Voice", "Enter voice ID", "API key source", "Save"], ["unavailable", "$MISSING_KEY"]);
+        const result = await showProviderSettings(pi, failed.ctx, changed);
+        assert.equal(result?.providers.elevenlabs?.voiceName, undefined);
+        assert.equal(result?.providers.elevenlabs?.voice, "unavailable");
+        assert.ok(failed.menus.some((menu) => menu.options.includes("Voice · name unavailable · unavailable")));
+        assert.equal(result?.providers.elevenlabs?.apiKey, "$MISSING_KEY");
+        assert.ok(failed.notices.every((notice) => !notice.includes("private response")));
+      } finally {
+        globalThis.fetch = previousFetch;
+        delete process.env.ELEVENLABS_API_KEY;
+      }
+    });
+    await t.test("empty search returns to browse/manual choices", async () => {
+      const previousFetch = globalThis.fetch;
+      process.env.ELEVENLABS_API_KEY = "synthetic-empty-key";
+      globalThis.fetch = async () => Response.json({ voices: [], has_more: false });
+      try {
+        await writeConfiguration(local);
+        const { ctx, notices, menus } = context(["ElevenLabs (cloud)", "Search account voices", "Enter voice ID", "Save"], ["", "absent", "manual-id"]);
+        const result = await showProviderSettings(pi, ctx, local);
+        assert.equal(result?.providers.elevenlabs?.voice, "manual-id");
+        assert.equal(menus.filter((menu) => menu.title === "ElevenLabs voice").length, 2);
+        assert.ok(notices.some((notice) => notice.includes("Browse account voices")));
+      } finally {
+        globalThis.fetch = previousFetch;
+        delete process.env.ELEVENLABS_API_KEY;
       }
     });
     await t.test("initial voice cancellation leaves no file", async () => {
@@ -194,10 +273,38 @@ test("provider settings UI", async (t) => {
       assert.equal(notices.length, 1);
     });
   } finally {
+    globalThis.fetch = originalFetch;
     if (original === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = original;
     if (originalKey === undefined) delete process.env.ELEVENLABS_API_KEY;
     else process.env.ELEVENLABS_API_KEY = originalKey;
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("single voice lookup uses direct endpoint and redacts failures", async () => {
+  const voice = await getElevenLabsVoice("id/encoded", undefined, {
+    apiKey: async () => "synthetic-key",
+    fetch: async (url, options) => {
+      assert.equal(String(url), "https://api.elevenlabs.io/v1/voices/id%2Fencoded");
+      assert.equal(new Headers(options?.headers).get("xi-api-key"), "synthetic-key");
+      assert.equal(options?.redirect, "error");
+      return Response.json({ voice_id: "id/encoded", name: "Brian", description: "Narrator" });
+    },
+  });
+  assert.deepEqual(voice, { id: "id/encoded", name: "Brian", description: "Narrator" });
+  for (const response of [new Response("secret-body", { status: 403 }), Response.json({ voice_id: "wrong", name: "secret-body" })]) {
+    await assert.rejects(getElevenLabsVoice("id", undefined, { apiKey: () => "synthetic-key", fetch: async () => response }), (error: Error) => !error.message.includes("secret-body"));
+  }
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(getElevenLabsVoice("id", controller.signal, { apiKey: () => { throw new Error("must not resolve"); } }), { name: "AbortError" });
+  await assert.rejects(getElevenLabsVoice("id", undefined, {
+    apiKey: () => "synthetic-key", timeoutMs: 5,
+    fetch: async (_url, options) => {
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      options?.signal?.throwIfAborted();
+      return Response.json({ voice_id: "id", name: "Brian" });
+    },
+  }), { name: "TimeoutError" });
 });

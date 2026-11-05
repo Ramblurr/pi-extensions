@@ -44,8 +44,10 @@ offline readiness.
 ### ElevenLabs
 
 Choose **ElevenLabs (cloud)** in `/speak`, accept the transmission/quota notice,
-and configure an API key source and voice. Choose `eleven_v4` for quality or
-`eleven_v4_turbo` for lower latency. Stability and similarity range from 0 to 1.
+and configure an API key source and voice. **Browse account voices** opens a
+paginated list without a search prompt; search and manual ID entry are also
+available. Menus show voice names first, with IDs as secondary detail. Choose
+`eleven_v4` for quality or `eleven_v4_turbo` for lower latency. Stability and similarity range from 0 to 1.
 
 The key source uses Pi's config-value syntax:
 
@@ -62,7 +64,9 @@ successes/failures are cached for the process lifetime. Commands have Pi's
 Start a fresh Pi session or reload after fixing a cached command failure.
 
 The API key needs text-to-speech access. Account voice search additionally
-needs Voices read access. Manual voice-ID entry works without voice search.
+needs Voices read access. Manual voice-ID entry works without voice search;
+if the name lookup fails, the menu shows the ID with “name unavailable” and
+still lets you edit the configuration.
 
 Example tool input:
 

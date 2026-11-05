@@ -49,6 +49,10 @@ function validateConfiguration(value: unknown): SpeechConfiguration | undefined 
     if (cloud.apiKey !== undefined && !isApiKeySource(cloud.apiKey)) return undefined;
     providers.elevenlabs = { model: cloud.model, voice: cloud.voice.trim(), stability: cloud.stability, similarity: cloud.similarity };
     if (cloud.apiKey !== undefined) providers.elevenlabs.apiKey = cloud.apiKey as string;
+    if (cloud.voiceName !== undefined) {
+      if (typeof cloud.voiceName !== "string" || !cloud.voiceName.trim()) return undefined;
+      providers.elevenlabs.voiceName = cloud.voiceName.trim();
+    }
   }
   if (!providers[value.provider]) return undefined;
   const configuration: SpeechConfiguration = { version: 2, provider: value.provider, providers };

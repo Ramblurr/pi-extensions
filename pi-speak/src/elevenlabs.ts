@@ -119,6 +119,41 @@ export class ElevenLabsProvider implements SpeechProvider {
   }
 }
 
+export async function getElevenLabsVoice(
+  voiceId: string, signal?: AbortSignal, http: HttpOptions = {},
+): Promise<VoicePage["voices"][number]> {
+  signal?.throwIfAborted();
+  const key = await apiKey(http);
+  signal?.throwIfAborted();
+  const abortSignal = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(http.timeoutMs ?? 15_000)]);
+  let response: Response;
+  try {
+    response = await (http.fetch ?? fetch)(`${BASE_URL}/v1/voices/${encodeURIComponent(voiceId)}`, {
+      signal: abortSignal, redirect: "error", headers: { "xi-api-key": key },
+    });
+  } catch {
+    abortSignal.throwIfAborted();
+    throw new Error("ElevenLabs voice lookup failed");
+  }
+  try {
+    checkResponse(response);
+    const data: unknown = await response.json();
+    abortSignal.throwIfAborted();
+    if (!data || typeof data !== "object" || !("voice_id" in data) || data.voice_id !== voiceId ||
+        !("name" in data) || typeof data.name !== "string" || !data.name.trim()) {
+      throw new Error("Invalid voice response");
+    }
+    return { id: voiceId, name: data.name.trim(),
+      description: "description" in data && typeof data.description === "string" ? data.description : "" };
+  } catch (error) {
+    abortSignal.throwIfAborted();
+    if (error instanceof Error && error.message.startsWith("ElevenLabs HTTP")) throw error;
+    throw new Error("ElevenLabs returned invalid voice details");
+  } finally {
+    await response.body?.cancel().catch(() => undefined);
+  }
+}
+
 export async function searchElevenLabsVoices(
   query = "", nextPage?: string, signal?: AbortSignal, http: HttpOptions = {},
 ): Promise<VoicePage> {

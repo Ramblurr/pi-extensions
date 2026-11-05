@@ -37,21 +37,15 @@ export function registerSpeakTool(pi: ExtensionAPI, options: SpeakToolOptions): 
     async execute(_id, parameters, signal) {
       if (shuttingDown) throw new Error("pi-speak is shutting down");
       const configuration = await (await options.getRuntime()).getConfiguration();
-      const { describeProvider, searchProviderVoices } = await import("./speech-providers.js");
+      const { describeProvider, providerDefaults, searchProviderVoices } = await import("./speech-providers.js");
       const description = describeProvider(configuration);
       const result = {
         provider: configuration?.provider ?? "kokoro",
-        defaults: configuration?.provider === "elevenlabs" ? {
-          model: configuration.providers.elevenlabs?.model, voice: configuration.providers.elevenlabs?.voice,
-          stability: configuration.providers.elevenlabs?.stability, similarity: configuration.providers.elevenlabs?.similarity,
-        } :
-          configuration?.providers.kokoro ? {
-            model: configuration.providers.kokoro.model.id,
-            voice: configuration.providers.kokoro.voice, speed: configuration.providers.kokoro.speed,
-          } : undefined,
+        defaults: providerDefaults(configuration),
         delivery: configuration?.provider === "elevenlabs" ? "streaming" : "buffered",
         parameters: description.parameters,
         guidance: description.guidelines,
+        example: { tool: "speak", arguments: description.example },
         ...(configuration && (parameters.query !== undefined || parameters.nextPage !== undefined)
           ? await searchProviderVoices(configuration, parameters.query, parameters.nextPage, signal) : {}),
       };

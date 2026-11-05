@@ -7,7 +7,7 @@ import { readConfiguration, writeConfiguration, type SpeechConfiguration } from 
 import { CATALOG_MODELS } from "../src/catalog.js";
 import { settingsForModel } from "../src/settings.js";
 
-const cloud = { model: "eleven_v4", voice: "voice-id", stability: 0.5, similarity: 0.75 } as const;
+const cloud = { model: "eleven_v4", voice: "voice-id", voiceName: "Brian", stability: 0.5, similarity: 0.75 } as const;
 
 test("provider configuration persistence", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "pi-speak-v2-"));
@@ -60,6 +60,8 @@ test("provider configuration persistence", async (t) => {
       const good: SpeechConfiguration = { version: 2, provider: "elevenlabs", providers: { elevenlabs: cloud } };
       const invalid = [
         { ...good, version: 3 },
+        { ...good, providers: { elevenlabs: { ...cloud, voiceName: 5 } } },
+        { ...good, providers: { elevenlabs: { ...cloud, voiceName: " " } } },
         { ...good, providers: { elevenlabs: { ...cloud, apiKey: "literal-secret" } } },
         { ...good, provider: "kokoro" },
         { ...good, providers: { elevenlabs: { ...cloud, model: "eleven_v3" } } },
