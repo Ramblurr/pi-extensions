@@ -6,7 +6,8 @@ import { stat } from "node:fs/promises";
 import { isApiKeySource, resolveElevenLabsKey } from "./credentials.js";
 import { choosePreprocessingModel, showSpeakSettings } from "./settings-menu.js";
 import type { PiSpeakSettings } from "./settings.js";
-import type { ElevenLabsConfig } from "./speech-provider.js";
+import type { ElevenLabsConfig, VoicePage } from "./speech-provider.js";
+import { showVoicePicker } from "./voice-picker.js";
 
 async function chooseApiKeySource(ctx: ExtensionCommandContext, current = "$ELEVENLABS_API_KEY"): Promise<string | undefined> {
   while (true) {
@@ -18,46 +19,64 @@ async function chooseApiKeySource(ctx: ExtensionCommandContext, current = "$ELEV
   }
 }
 
-async function lookupVoiceName(cloud: ElevenLabsConfig): Promise<string | undefined> {
+async function withVoiceLoading<T>(ctx: ExtensionCommandContext, operation: () => Promise<T>): Promise<T> {
+  let shown = false;
+  const timer = setTimeout(() => {
+    shown = true;
+    ctx.ui.setStatus("pi-speak-voices", "Loading voices…");
+  }, 200);
   try {
-    return (await getElevenLabsVoice(cloud.voice, undefined, { apiKey: () => resolveElevenLabsKey(cloud) })).name;
+    return await operation();
+  } finally {
+    clearTimeout(timer);
+    if (shown) ctx.ui.setStatus("pi-speak-voices", undefined);
+  }
+}
+
+async function lookupVoiceName(ctx: ExtensionCommandContext, cloud: ElevenLabsConfig): Promise<string | undefined> {
+  try {
+    return (await withVoiceLoading(ctx, () => getElevenLabsVoice(cloud.voice, undefined, { apiKey: () => resolveElevenLabsKey(cloud) }))).name;
   } catch {
     // Name discovery is optional: missing credentials/permissions must not block editing.
     return undefined;
   }
 }
 
-async function chooseCloudVoice(ctx: ExtensionCommandContext, cloud: ElevenLabsConfig): Promise<Pick<ElevenLabsConfig, "voice" | "voiceName"> | undefined> {
+export type SpeechPreview = (cloud: ElevenLabsConfig, voice: string, signal: AbortSignal) => Promise<void>;
+
+async function chooseCloudVoice(ctx: ExtensionCommandContext, cloud: ElevenLabsConfig, preview?: SpeechPreview): Promise<Pick<ElevenLabsConfig, "voice" | "voiceName"> | undefined> {
   const method = await ctx.ui.select("ElevenLabs voice", ["Browse account voices", "Search account voices", "Enter voice ID"]);
   if (method === "Enter voice ID") {
     const voice = (await ctx.ui.input("ElevenLabs voice ID", cloud.voice))?.trim();
     if (voice === "") ctx.ui.notify("Enter a nonempty voice ID.", "error");
     if (!voice) return undefined;
-    const voiceName = await lookupVoiceName({ ...cloud, voice });
+    const voiceName = await lookupVoiceName(ctx, { ...cloud, voice });
     return voiceName ? { voice, voiceName } : { voice };
   }
   if (method !== "Search account voices" && method !== "Browse account voices") return undefined;
   const query = method === "Browse account voices" ? "" : await ctx.ui.input("Search account voices", "Name or description");
   if (query === undefined) return undefined;
-  let nextPage: string | undefined;
-  do {
-    const page = await searchElevenLabsVoices(query.trim() || undefined, nextPage, undefined, { apiKey: () => resolveElevenLabsKey(cloud) });
-    const labels = page.voices.map((voice) => `${voice.name} · ${voice.id}${voice.description ? ` — ${voice.description}` : ""}`);
-    const more = "Next page";
-    if (page.nextPage) labels.push(more);
-    if (labels.length === 0) {
-      ctx.ui.notify("No matching voices. Choose Browse account voices, try another search, or enter a voice ID.", "info");
-      return chooseCloudVoice(ctx, cloud);
-    }
-    const selected = await ctx.ui.select("Account voices", labels);
-    if (!selected) return undefined;
-    if (selected !== more) {
-      const voice = page.voices[labels.indexOf(selected)];
-      return voice ? { voice: voice.id, voiceName: voice.name } : undefined;
-    }
-    nextPage = page.nextPage;
-  } while (nextPage);
-  return undefined;
+  const voices = await withVoiceLoading(ctx, async () => {
+    const byId = new Map<string, VoicePage["voices"][number]>();
+    const tokens = new Set<string>();
+    let nextPage: string | undefined;
+    do {
+      const page = await searchElevenLabsVoices(query.trim() || undefined, nextPage, undefined, { apiKey: () => resolveElevenLabsKey(cloud) });
+      for (const voice of page.voices) if (!byId.has(voice.id)) byId.set(voice.id, voice);
+      nextPage = page.nextPage;
+      if (nextPage) {
+        if (tokens.has(nextPage)) throw new Error("ElevenLabs voice lookup returned a repeated page token. Try again later.");
+        tokens.add(nextPage);
+      }
+    } while (nextPage);
+    return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name, "en", { sensitivity: "accent" }) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  });
+  if (voices.length === 0) {
+    ctx.ui.notify("No matching voices. Choose Browse account voices, try another search, or enter a voice ID.", "info");
+    return chooseCloudVoice(ctx, cloud, preview);
+  }
+  const selected = await showVoicePicker(ctx, { voices }, preview ? (voice, signal) => preview(cloud, voice, signal) : undefined);
+  return selected ? { voice: selected.voice.id, voiceName: selected.voice.name } : undefined;
 }
 
 async function chooseUnitNumber(ctx: ExtensionCommandContext, label: string, current: number): Promise<number | undefined> {
@@ -75,6 +94,7 @@ export async function showProviderSettings(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   configuration?: SpeechConfiguration,
+  preview?: SpeechPreview,
 ): Promise<SpeechConfiguration | undefined> {
   if (!ctx.hasUI) return configuration;
   if (!configuration) {
@@ -147,12 +167,12 @@ export async function showProviderSettings(
       const apiKey = await chooseApiKeySource(ctx);
       if (apiKey === undefined) return configuration;
       cloud = { model: "eleven_v4", voice: "", stability: 0.5, similarity: 0.75, apiKey };
-      const voice = await chooseCloudVoice(ctx, cloud);
+      const voice = await chooseCloudVoice(ctx, cloud, preview);
       if (!voice) return configuration;
       Object.assign(cloud, voice);
       draft.providers.elevenlabs = cloud;
     } else if (!cloud.voiceName) {
-      const name = await lookupVoiceName(cloud);
+      const name = await lookupVoiceName(ctx, cloud);
       if (name) cloud.voiceName = name;
     }
     while (true) {
@@ -175,7 +195,7 @@ export async function showProviderSettings(
         const model = await ctx.ui.select("ElevenLabs model", ["eleven_v4", "eleven_v4_turbo"]);
         if (model === "eleven_v4" || model === "eleven_v4_turbo") cloud.model = model;
       } else if (choice === voiceChoice) {
-        const voice = await chooseCloudVoice(ctx, cloud);
+        const voice = await chooseCloudVoice(ctx, cloud, preview);
         if (voice) {
           delete cloud.voiceName;
           Object.assign(cloud, voice);

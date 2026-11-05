@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SpeechConfiguration } from "./configuration.js";
-import type { SpeechAudio, SpeechProvider, SpeechRequest } from "./speech-provider.js";
+import type { ElevenLabsConfig, SpeechAudio, SpeechProvider, SpeechRequest } from "./speech-provider.js";
 import type { SynthesisService } from "./synthesis-service.js";
 import { SpeechQueue } from "./speech-queue.js";
 import { createSpeechProvider, requireProviderConfiguration } from "./speech-providers.js";
@@ -77,7 +77,13 @@ export function createPiSpeakRuntime(pi: ExtensionAPI, options: PiSpeakRuntimeOp
     await runExclusive(ctx, async () => {
       const configuration = await getConfiguration();
       const { showProviderSettings } = await import("./provider-menu.js");
-      await showProviderSettings(pi, ctx, configuration);
+      await showProviderSettings(pi, ctx, configuration, (cloud: ElevenLabsConfig, voice: string, signal: AbortSignal) => {
+        const previewConfiguration: SpeechConfiguration = {
+          version: 2, provider: "elevenlabs", providers: { elevenlabs: { ...cloud, voice } },
+        };
+        return queue.enqueue((jobSignal) => withStatus(ctx, () => play(previewConfiguration,
+          { text: "The quick brown fox jumps over the lazy dog." }, ctx, jobSignal)), signal);
+      });
       await options.onConfigurationChanged?.();
     });
   }

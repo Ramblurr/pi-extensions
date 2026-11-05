@@ -45,9 +45,19 @@ offline readiness.
 
 Choose **ElevenLabs (cloud)** in `/speak`, accept the transmission/quota notice,
 and configure an API key source and voice. **Browse account voices** opens a
-paginated list without a search prompt; search and manual ID entry are also
-available. Menus show voice names first, with IDs as secondary detail. Choose
-`eleven_v4` for quality or `eleven_v4_turbo` for lower latency. Stability and similarity range from 0 to 1.
+complete alphabetically sorted list without a search prompt or page controls;
+search and manual ID entry are also
+available. The width-aware browser keeps one voice per row and shows the
+highlighted voice's description and ID below the list. Slow lookups show a
+subtle loading indicator; fast requests do not flash one.
+
+Press **P** in the browser to toggle previews, off by default. When enabled,
+pausing on a voice reads “The quick brown fox jumps over the lazy dog.” with
+your current draft model/settings. Moving, turning previews off, or closing
+the browser cancels its preview. Previews use credits; there is no audio cache
+or automatic retry. A short debounce avoids generation while scrolling quickly.
+
+Choose `eleven_v4` for quality or `eleven_v4_turbo` for lower latency. Stability and similarity range from 0 to 1.
 
 The key source uses Pi's config-value syntax:
 

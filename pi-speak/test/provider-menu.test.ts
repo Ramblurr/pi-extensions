@@ -9,11 +9,13 @@ import { readConfiguration, writeConfiguration, type SpeechConfiguration } from 
 import { settingsForModel } from "../src/settings.js";
 import { CATALOG_MODELS } from "../src/catalog.js";
 import { getElevenLabsVoice } from "../src/elevenlabs.js";
+import { KeybindingsManager, TUI_KEYBINDINGS, type TUI } from "@earendil-works/pi-tui";
 
 function context(answers: Array<string | undefined>, inputs: Array<string | undefined> = [], consent = true) {
   const notices: string[] = [];
   const confirmations: string[] = [];
   const menus: Array<{ title: string; options: string[] }> = [];
+  const statuses: Array<string | undefined> = [];
   const ctx = {
     mode: "rpc", hasUI: true, scopedModels: [],
     modelRegistry: { refresh: async () => {}, getAvailable: () => [{ provider: "llm", id: "summary" }] },
@@ -24,16 +26,32 @@ function context(answers: Array<string | undefined>, inputs: Array<string | unde
         assert.ok(answers.length, `Unexpected menu: ${_title}`);
         const answer = answers.shift();
         if (answer === undefined) return undefined;
-        const match = options.find((option) => option === answer || option.startsWith(answer));
+        const match = options.find((option) => option === answer || option.replace(/^\d+\. /, "").startsWith(answer));
         assert.ok(match, `Missing option ${answer} in ${options}`);
         return match;
       },
+      custom: async (factory: Parameters<ExtensionCommandContext["ui"]["custom"]>[0]) => {
+        const answer = answers.shift();
+        let result: unknown;
+        // SAFETY: the picker uses only terminal.rows and requestRender from TUI.
+        const tui = { terminal: { rows: 24 }, requestRender: () => {} } as unknown as TUI;
+        const component = await factory(tui, ctx.ui.theme, new KeybindingsManager(TUI_KEYBINDINGS) as Parameters<Parameters<ExtensionCommandContext["ui"]["custom"]>[0]>[2], (value) => { result = value; });
+        for (let index = 0; index < 30; index++) {
+          const lines = component.render(80);
+          menus.push({ title: "Voice picker", options: lines });
+          if (answer === undefined) { component.handleInput!("\x1b"); return result; }
+          if (lines.some((line) => line.startsWith(`→ ${answer}`))) { component.handleInput!("\r"); return result; }
+          component.handleInput!("\x1b[B");
+        }
+        assert.fail(`Could not select ${answer} in custom voice picker`);
+      },
+      setStatus: (_key: string, status: string | undefined) => statuses.push(status),
       input: async () => inputs.shift(),
       confirm: async (_title: string, text: string) => { confirmations.push(text); return consent; },
       notify: (text: string) => notices.push(text),
     },
   } as unknown as ExtensionCommandContext;
-  return { ctx, notices, confirmations, menus };
+  return { ctx, notices, confirmations, menus, statuses };
 }
 const pi = {} as ExtensionAPI;
 
@@ -99,7 +117,7 @@ test("provider settings UI", async (t) => {
       assert.ok(edit.notices.some((notice) => notice.includes("not a literal API key")));
       assert.ok(edit.notices.every((notice) => !notice.includes("sk-literal-secret")));
     });
-    await t.test("voice search pages explicitly and saves the selected ID", async () => {
+    await t.test("voice search combines all pages and saves the selected ID", async () => {
       const originalFetch = globalThis.fetch;
       const originalSearchKey = process.env.PI_SPEAK_TEST_SEARCH_KEY;
       process.env.PI_SPEAK_TEST_SEARCH_KEY = "test-key-not-real";
@@ -112,7 +130,7 @@ test("provider settings UI", async (t) => {
       };
       try {
         await writeConfiguration(local);
-        const { ctx } = context(["ElevenLabs (cloud)", "Search account voices", "Next page", "Second", "Save"], ["${PI_SPEAK_TEST_SEARCH_KEY}", "narrator"]);
+        const { ctx } = context(["ElevenLabs (cloud)", "Search account voices", "Second", "Save"], ["${PI_SPEAK_TEST_SEARCH_KEY}", "narrator"]);
         const result = await showProviderSettings(pi, ctx, local);
         assert.equal(result?.providers.elevenlabs?.voice, "second-id");
         assert.equal(result?.providers.elevenlabs?.voiceName, "Second");
@@ -125,18 +143,22 @@ test("provider settings UI", async (t) => {
         else process.env.PI_SPEAK_TEST_SEARCH_KEY = originalSearchKey;
       }
     });
-    await t.test("browse lists unfiltered pages without query input and saves a recognizable name", async () => {
+    await t.test("browse combines pages, deduplicates IDs and sorts names before opening the picker", async () => {
       const previousFetch = globalThis.fetch;
       process.env.ELEVENLABS_API_KEY = "synthetic-browse-key";
       const urls: URL[] = [];
       globalThis.fetch = async (url) => {
         urls.push(new URL(String(url)));
         const second = urls.length === 2;
-        return Response.json({ voices: [{ voice_id: second ? "b-id" : "a-id", name: second ? "Brian" : "Alice", description: "Narrator" }], has_more: !second, ...(!second ? { next_page_token: "next" } : {}) });
+        return Response.json({ voices: second
+          ? [{ voice_id: "b-id", name: "Brian" }, { voice_id: "a-id", name: "Alice" }, { voice_id: "z-id", name: "Duplicate ignored" }]
+          : [{ voice_id: "z-id", name: "Zulu" }, { voice_id: "c-id", name: "brian" }],
+          has_more: !second, ...(!second ? { next_page_token: "next" } : {}) });
       };
       try {
         await writeConfiguration(local);
-        const { ctx, menus } = context(["ElevenLabs (cloud)", "Browse account voices", "Next page", "Brian", "Save"]);
+        const { ctx, menus } = context(["ElevenLabs (cloud)", "Browse account voices", "Brian", "Save"]);
+        Object.assign(ctx, { mode: "tui" });
         let inputCount = 0;
         ctx.ui.input = async () => { assert.equal(++inputCount, 1, "only credential source input is needed"); return ""; };
         const result = await showProviderSettings(pi, ctx, local);
@@ -144,7 +166,35 @@ test("provider settings UI", async (t) => {
         assert.equal((await readConfiguration()).configuration?.providers.elevenlabs?.voiceName, "Brian");
         assert.deepEqual(urls.map((url) => [url.pathname, url.searchParams.get("search"), url.searchParams.get("next_page_token")]), [["/v2/voices", null, null], ["/v2/voices", null, "next"]]);
         assert.ok(menus.some((menu) => menu.options.includes("Voice · Brian · b-id")));
+        assert.deepEqual(menus.find((menu) => menu.title === "Voice picker")?.options.slice(2, 6), ["→ Alice", "  Brian", "  brian", "  Zulu"]);
+        assert.ok(menus.every((menu) => menu.options.every((option) => !option.includes("Next page"))));
         assert.deepEqual(menus.find((menu) => menu.title === "ElevenLabs voice")?.options, ["Browse account voices", "Search account voices", "Enter voice ID"]);
+      } finally {
+        globalThis.fetch = previousFetch;
+        delete process.env.ELEVENLABS_API_KEY;
+      }
+    });
+    await t.test("repeated pagination token fails finitely and clears whole-fetch loading status", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      const previousFetch = globalThis.fetch;
+      process.env.ELEVENLABS_API_KEY = "synthetic-pages-key";
+      let calls = 0;
+      globalThis.fetch = async () => {
+        calls++;
+        assert.ok(calls <= 2, "must not fetch a repeated token again");
+        t.mock.timers.tick(120);
+        return Response.json({ voices: [], has_more: true, next_page_token: "do-not-echo-token" });
+      };
+      try {
+        await writeConfiguration(local);
+        const { ctx, notices, statuses, menus } = context(["ElevenLabs (cloud)", "Browse account voices"], [""]);
+        assert.deepEqual(await showProviderSettings(pi, ctx, local), local);
+        assert.equal(calls, 2);
+        assert.ok(notices.some((notice) => notice.includes("repeated page token")));
+        assert.ok(notices.every((notice) => !notice.includes("do-not-echo-token")));
+        assert.deepEqual(statuses, ["Loading voices…", undefined], "delay spans pages, rather than resetting per page");
+        assert.ok(menus.every((menu) => menu.title !== "Account voices"));
+        assert.deepEqual(await readConfiguration(), { configuration: local });
       } finally {
         globalThis.fetch = previousFetch;
         delete process.env.ELEVENLABS_API_KEY;
@@ -263,6 +313,80 @@ test("provider settings UI", async (t) => {
       } finally {
         if (originalCache === undefined) delete process.env.HF_HUB_CACHE;
         else process.env.HF_HUB_CACHE = originalCache;
+      }
+    });
+    await t.test("voice loading status is delayed and cleared after success and failure", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      const previousFetch = globalThis.fetch;
+      process.env.ELEVENLABS_API_KEY = "synthetic-status-key";
+      const existing: SpeechConfiguration = { ...local, provider: "elevenlabs", providers: { elevenlabs: cloud } };
+      try {
+        globalThis.fetch = async () => Response.json({ voice_id: "manual-id", name: "Brian" });
+        const fast = context(["ElevenLabs (cloud)", "Cancel"]);
+        await showProviderSettings(pi, fast.ctx, existing);
+        t.mock.timers.tick(1000);
+        assert.deepEqual(fast.statuses, [], "fast lookup never flickers");
+        for (const fail of [false, true]) {
+          let start!: () => void;
+          let finish!: () => void;
+          const started = new Promise<void>((resolve) => { start = resolve; });
+          globalThis.fetch = async () => {
+            start();
+            await new Promise<void>((resolve) => { finish = resolve; });
+            if (fail) throw new Error("synthetic network failure");
+            return Response.json({ voice_id: "manual-id", name: "Brian" });
+          };
+          const slow = context(["ElevenLabs (cloud)", "Cancel"]);
+          const pending = showProviderSettings(pi, slow.ctx, existing);
+          await started;
+          t.mock.timers.tick(199);
+          assert.deepEqual(slow.statuses, []);
+          t.mock.timers.tick(1);
+          assert.deepEqual(slow.statuses, ["Loading voices…"]);
+          finish();
+          await pending;
+          assert.deepEqual(slow.statuses, ["Loading voices…", undefined]);
+          t.mock.timers.tick(1000);
+          assert.equal(slow.statuses.length, 2, "no orphaned status timer");
+        }
+      } finally {
+        globalThis.fetch = previousFetch;
+        delete process.env.ELEVENLABS_API_KEY;
+      }
+    });
+    await t.test("preview receives unsaved cloud settings and cancels its own signal on picker close", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      const previousFetch = globalThis.fetch;
+      process.env.ELEVENLABS_API_KEY = "synthetic-preview-key";
+      globalThis.fetch = async () => Response.json({ voices: [{ voice_id: "preview-id", name: "Brian", description: "Narrator" }], has_more: false });
+      try {
+        const existing: SpeechConfiguration = { ...local, provider: "elevenlabs", providers: { elevenlabs: { ...cloud, voiceName: "Original" } } };
+        const { ctx } = context(["ElevenLabs (cloud)", "Model", "eleven_v4_turbo", "Stability", "Voice", "Browse account voices", "Cancel"], ["0.25"]);
+        Object.assign(ctx, { mode: "tui" });
+        let requested: { config: unknown; voice: string; signal: AbortSignal } | undefined;
+        ctx.ui.custom = async (factory) => {
+          let result: unknown;
+          // SAFETY: this real component only needs rows and requestRender from TUI.
+          const tui = { terminal: { rows: 24 }, requestRender: () => {} } as unknown as TUI;
+          const component = await factory(tui, ctx.ui.theme, new KeybindingsManager(TUI_KEYBINDINGS) as Parameters<typeof factory>[2], (value) => { result = value; });
+          component.render(80);
+          component.handleInput!("p");
+          t.mock.timers.tick(300);
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          component.handleInput!("\x1b");
+          return result as never;
+        };
+        await showProviderSettings(pi, ctx, existing, async (config, voice, signal) => {
+          requested = { config: structuredClone(config), voice, signal };
+          await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+        });
+        assert.deepEqual(requested?.config, { ...cloud, voiceName: "Original", model: "eleven_v4_turbo", stability: 0.25 });
+        assert.equal(requested?.voice, "preview-id");
+        assert.equal(requested?.signal.aborted, true);
+        assert.equal(existing.providers.elevenlabs?.model, "eleven_v4", "preview does not persist draft edits");
+      } finally {
+        globalThis.fetch = previousFetch;
+        delete process.env.ELEVENLABS_API_KEY;
       }
     });
     await t.test("invalid existing data is never replaced by onboarding", async () => {
