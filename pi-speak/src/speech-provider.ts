@@ -31,7 +31,7 @@ export type ElevenLabsConfig = {
 };
 
 export type VoicePage = {
-  voices: Array<{ id: string; name: string; description: string }>;
+  voices: Array<{ id: string; name: string; description: string; labels?: Record<string, string> }>;
   nextPage?: string;
 };
 

@@ -126,7 +126,7 @@ test("provider settings UI", async (t) => {
         assert.equal(new Headers(options?.headers).get("xi-api-key"), "test-key-not-real");
         urls.push(new URL(String(url)));
         const second = urls.length === 2;
-        return Response.json({ voices: [{ voice_id: second ? "second-id" : "first-id", name: second ? "Second" : "First", description: "Test voice" }], has_more: !second, ...(!second ? { next_page_token: "page-2" } : {}) });
+        return Response.json({ voices: [{ voice_id: second ? "second-id" : "first-id", name: second ? "Second" : "First", description: "Test narrator voice" }], has_more: !second, ...(!second ? { next_page_token: "page-2" } : {}) });
       };
       try {
         await writeConfiguration(local);
@@ -135,7 +135,7 @@ test("provider settings UI", async (t) => {
         assert.equal(result?.providers.elevenlabs?.voice, "second-id");
         assert.equal(result?.providers.elevenlabs?.voiceName, "Second");
         assert.equal((await readConfiguration()).configuration?.providers.elevenlabs?.voiceName, "Second");
-        assert.deepEqual(urls.map((url) => [url.searchParams.get("search"), url.searchParams.get("next_page_token")]), [["narrator", null], ["narrator", "page-2"]]);
+        assert.deepEqual(urls.map((url) => [url.searchParams.get("search"), url.searchParams.get("next_page_token")]), [[null, null], [null, "page-2"]]);
         assert.ok(!(await readFile(path, "utf8")).includes("test-key-not-real"));
       } finally {
         globalThis.fetch = originalFetch;
@@ -171,6 +171,44 @@ test("provider settings UI", async (t) => {
         assert.deepEqual(menus.find((menu) => menu.title === "ElevenLabs voice")?.options, ["Browse account voices", "Search account voices", "Enter voice ID"]);
       } finally {
         globalThis.fetch = previousFetch;
+        delete process.env.ELEVENLABS_API_KEY;
+      }
+    });
+    await t.test("initial search can broaden locally without fetching or synthesizing", async () => {
+      process.env.ELEVENLABS_API_KEY = "synthetic-local-search-key";
+      let requests = 0;
+      let previews = 0;
+      globalThis.fetch = async (url) => {
+        requests++;
+        assert.equal(new URL(String(url)).searchParams.get("search"), null);
+        return Response.json({ voices: [
+          { voice_id: "a", name: "Alice", labels: { gender: "female" } },
+          { voice_id: "b", name: "Brian", labels: { gender: "male" } },
+        ], has_more: false });
+      };
+      try {
+        const existing: SpeechConfiguration = { ...local, provider: "elevenlabs", providers: { elevenlabs: { ...cloud, voiceName: "Original" } } };
+        const { ctx } = context(["ElevenLabs (cloud)", "Voice", "Search account voices", "Save"], ["Alice"]);
+        Object.assign(ctx, { mode: "tui" });
+        ctx.ui.custom = async (factory) => {
+          let result: unknown;
+          const tui = { terminal: { rows: 24 }, requestRender: () => {} } as unknown as TUI;
+          const component = await factory(tui, ctx.ui.theme, new KeybindingsManager(TUI_KEYBINDINGS) as Parameters<typeof factory>[2], (value) => { result = value; });
+          assert.match(component.render(100).join("\n"), /1\/2 voices.*Search: Alice/);
+          component.handleInput!("/");
+          component.handleInput!("\x15"); // native Ctrl+U clears the initial query
+          assert.match(component.render(100).join("\n"), /2\/2 voices/);
+          component.handleInput!("\r");
+          component.handleInput!("\x1b[B");
+          component.handleInput!("\r");
+          assert.equal(requests, 1);
+          assert.equal(previews, 0);
+          return result as never;
+        };
+        const result = await showProviderSettings(pi, ctx, existing, async () => { previews++; });
+        assert.equal(result?.providers.elevenlabs?.voice, "b");
+      } finally {
+        globalThis.fetch = originalFetch;
         delete process.env.ELEVENLABS_API_KEY;
       }
     });

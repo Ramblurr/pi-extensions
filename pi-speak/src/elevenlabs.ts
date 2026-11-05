@@ -144,7 +144,8 @@ export async function getElevenLabsVoice(
       throw new Error("Invalid voice response");
     }
     return { id: voiceId, name: data.name.trim(),
-      description: "description" in data && typeof data.description === "string" ? data.description : "" };
+      description: "description" in data && typeof data.description === "string" ? data.description : "",
+      ...voiceLabels("labels" in data ? data.labels : undefined) };
   } catch (error) {
     abortSignal.throwIfAborted();
     if (error instanceof Error && error.message.startsWith("ElevenLabs HTTP")) throw error;
@@ -152,6 +153,11 @@ export async function getElevenLabsVoice(
   } finally {
     await response.body?.cancel().catch(() => undefined);
   }
+}
+
+function voiceLabels(labels: unknown): { labels?: Record<string, string> } {
+  if (!labels || typeof labels !== "object" || Array.isArray(labels)) return {};
+  return { labels: Object.fromEntries(Object.entries(labels).filter((entry): entry is [string, string] => typeof entry[1] === "string")) };
 }
 
 export async function searchElevenLabsVoices(
@@ -189,9 +195,9 @@ export async function searchElevenLabsVoices(
         if (!entry || typeof entry !== "object" || !("voice_id" in entry) || typeof entry.voice_id !== "string") {
           throw new Error("Invalid voice response");
         }
-        const value = entry as { voice_id: string; name?: unknown; description?: unknown };
+        const value = entry as { voice_id: string; name?: unknown; description?: unknown; labels?: unknown };
         return { id: value.voice_id, name: typeof value.name === "string" ? value.name : value.voice_id,
-          description: typeof value.description === "string" ? value.description : "" };
+          description: typeof value.description === "string" ? value.description : "", ...voiceLabels(value.labels) };
       }),
       ...(page.has_more ? { nextPage: page.next_page_token as string } : {}),
     };

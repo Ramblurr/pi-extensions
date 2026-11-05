@@ -46,10 +46,19 @@ offline readiness.
 Choose **ElevenLabs (cloud)** in `/speak`, accept the transmission/quota notice,
 and configure an API key source and voice. **Browse account voices** opens a
 complete alphabetically sorted list without a search prompt or page controls;
-search and manual ID entry are also
-available. The width-aware browser keeps one voice per row and shows the
+search and manual ID entry are also available. The width-aware browser keeps one voice per row and shows the
 highlighted voice's description and ID below the list. Slow lookups show a
 subtle loading indicator; fast requests do not flash one.
+
+Press **/** to search names, descriptions, and labels locally. Press **F** for
+Gender, Accent, Age, and Use case filters. Use arrow keys and Enter to choose
+values, then **Apply**; **Clear all** resets the filters, and **Cancel** discards
+edits. Fields combine with AND. The browser shows active filters and the
+matching count. Choices come from ElevenLabs metadata; missing labels appear
+as **Unspecified**, rather than being inferred from a voice's name.
+
+Search and filtering make no additional network requests after the voice list
+loads. Preview pauses while editing them; typing `p` in search enters text.
 
 Press **P** in the browser to toggle previews, off by default. When enabled,
 pausing on a voice reads “The quick brown fox jumps over the lazy dog.” with
@@ -57,7 +66,8 @@ your current draft model/settings. Moving, turning previews off, or closing
 the browser cancels its preview. Previews use credits; there is no audio cache
 or automatic retry. A short debounce avoids generation while scrolling quickly.
 
-Choose `eleven_v4` for quality or `eleven_v4_turbo` for lower latency. Stability and similarity range from 0 to 1.
+Choose `eleven_v4` for quality or `eleven_v4_turbo` for lower latency.
+Stability and similarity range from 0 to 1.
 
 The key source uses Pi's config-value syntax:
 

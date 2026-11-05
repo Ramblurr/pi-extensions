@@ -61,7 +61,7 @@ async function chooseCloudVoice(ctx: ExtensionCommandContext, cloud: ElevenLabsC
     const tokens = new Set<string>();
     let nextPage: string | undefined;
     do {
-      const page = await searchElevenLabsVoices(query.trim() || undefined, nextPage, undefined, { apiKey: () => resolveElevenLabsKey(cloud) });
+      const page = await searchElevenLabsVoices(undefined, nextPage, undefined, { apiKey: () => resolveElevenLabsKey(cloud) });
       for (const voice of page.voices) if (!byId.has(voice.id)) byId.set(voice.id, voice);
       nextPage = page.nextPage;
       if (nextPage) {
@@ -75,7 +75,7 @@ async function chooseCloudVoice(ctx: ExtensionCommandContext, cloud: ElevenLabsC
     ctx.ui.notify("No matching voices. Choose Browse account voices, try another search, or enter a voice ID.", "info");
     return chooseCloudVoice(ctx, cloud, preview);
   }
-  const selected = await showVoicePicker(ctx, { voices }, preview ? (voice, signal) => preview(cloud, voice, signal) : undefined);
+  const selected = await showVoicePicker(ctx, { voices }, preview ? (voice, signal) => preview(cloud, voice, signal) : undefined, query);
   return selected ? { voice: selected.voice.id, voiceName: selected.voice.name } : undefined;
 }
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ElevenLabsProvider, searchElevenLabsVoices } from "../src/elevenlabs.js";
+import { ElevenLabsProvider, getElevenLabsVoice, searchElevenLabsVoices } from "../src/elevenlabs.js";
 import { kokoroDescription, elevenLabsDescription } from "../src/provider-descriptions.js";
 
 const config = { model: "eleven_v4" as const, voice: "voice-id", stability: 0.5, similarity: 0.75 };
@@ -105,6 +105,27 @@ test("voice discovery preserves a usable next-page token without exposing remote
     },
   });
   assert.deepEqual(page, { voices: [{ id: "v1", name: "Name", description: "British voice" }], nextPage: "page-three" });
+});
+
+test("voice discovery and direct lookup preserve only string label maps safely", async () => {
+  const labels = JSON.parse('{"gender":"male","accent":"british","age":"middle_aged","use_case":"conversational","extra":"custom label","__proto__":"data","invalid":42,"nested":{"secret":"ignored"}}');
+  const expected = JSON.parse('{"gender":"male","accent":"british","age":"middle_aged","use_case":"conversational","extra":"custom label","__proto__":"data"}');
+  const entry = { voice_id: "v", name: "Voice", description: "Description", labels };
+  const page = await searchElevenLabsVoices(undefined, undefined, undefined, {
+    apiKey: () => "synthetic-key", fetch: async () => Response.json({ voices: [entry], has_more: false }),
+  });
+  const direct = await getElevenLabsVoice("v", undefined, {
+    apiKey: () => "synthetic-key", fetch: async () => Response.json(entry),
+  });
+  assert.deepEqual(page.voices, [{ id: "v", name: "Voice", description: "Description", labels: expected }]);
+  assert.deepEqual(direct, page.voices[0]);
+  assert.equal(Object.getPrototypeOf(direct.labels), Object.prototype);
+  for (const invalid of [undefined, null, 12, "male", ["male"]]) {
+    const result = await searchElevenLabsVoices(undefined, undefined, undefined, {
+      apiKey: () => "synthetic-key", fetch: async () => Response.json({ voices: [{ ...entry, labels: invalid }], has_more: false }),
+    });
+    assert.deepEqual(result.voices, [{ id: "v", name: "Voice", description: "Description" }]);
+  }
 });
 
 test("ElevenLabs preserves delivery tags and yields audio before the response finishes", async () => {
