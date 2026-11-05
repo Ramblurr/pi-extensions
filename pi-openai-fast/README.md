@@ -80,11 +80,9 @@ Here `<pi-config-dir>` is Pi's runtime config directory name (`CONFIG_DIR_NAME`;
 pi install ./pi-openai-fast
 ```
 
-### npm package
+### Git
 
-```bash
-pi install npm:@ramblurr/pi-openai-fast
-```
+[Install from Git](../README.md#install-extensions).
 
 Then reload pi:
 

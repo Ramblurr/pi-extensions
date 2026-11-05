@@ -24,11 +24,9 @@ Heartbeat state is stored in the current Pi session, so reload and resume restor
 pi install ./pi-heartbeat
 ```
 
-### npm package
+### Git
 
-```bash
-pi install npm:@ramblurr/pi-heartbeat
-```
+[Install from Git](../README.md#install-extensions).
 
 Then reload Pi:
 

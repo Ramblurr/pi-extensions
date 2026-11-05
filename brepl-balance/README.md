@@ -13,9 +13,7 @@ Supported extensions: `.edn`, `.clj`, `.cljc`, `.cljs`, and `.cljd`.
 
 ## Install
 
-```bash
-pi install npm:@ramblurr/brepl-balance
-```
+[Install from Git](../README.md#install-extensions).
 
 Then reload Pi:
 

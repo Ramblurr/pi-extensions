@@ -23,13 +23,7 @@ Install a local checkout with:
 pi install /absolute/path/to/pi-sexp-edit
 ```
 
-After publication, install the versioned npm package with:
-
-```bash
-pi install npm:@ramblurr/pi-sexp-edit@0.1.0
-```
-
-Use `pi remove npm:@ramblurr/pi-sexp-edit` to remove an npm installation.
+Or [install from Git](../README.md#install-extensions).
 
 ## Requirements
 

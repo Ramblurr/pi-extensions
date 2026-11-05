@@ -26,7 +26,7 @@ Extensions and tools for [pi](https://github.com/earendil-works/pi), the termina
 ## Install extensions
 
 ```bash
-pi install npm:@ramblurr/<package-name>
+pi install git:github.com/ramblurr/pi-extensions
 ```
 
-See each package's README for setup and usage.
+Select extensions with `pi config`. See each package's README for setup and usage.

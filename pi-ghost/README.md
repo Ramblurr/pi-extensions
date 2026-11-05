@@ -8,17 +8,7 @@ Open a temporary "ghost" session inside the current pi UI, ask something quick, 
 
 ## Install
 
-```bash
-pi install npm:@ogulcancelik/pi-ghost
-```
-
-Or add it manually to `~/.pi/agent/settings.json`:
-
-```json
-{
-  "packages": ["npm:@ogulcancelik/pi-ghost"]
-}
-```
+[Install from Git](../README.md#install-extensions).
 
 Then reload pi:
 
