@@ -30,8 +30,3 @@ pi install npm:@ramblurr/<package-name>
 ```
 
 See each package's README for setup and usage.
-
-`pi-speak` is currently a private, local-load package, not an npm release. Its
-[setup guide](pi-speak/README.md#try-without-installing-globally) covers loading
-it from this checkout, configuring providers and credentials, and using the
-voice browser. It is not enabled by the root extension manifest.
