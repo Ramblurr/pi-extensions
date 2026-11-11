@@ -4,6 +4,7 @@
   "pi": {
     "extensions": [
       "brepl-balance/index.ts",
+      "pi-cliproxy/index.ts",
       "pi-ghost/index.ts",
       "pi-heartbeat/index.ts",
       "pi-link-control/index.ts",
