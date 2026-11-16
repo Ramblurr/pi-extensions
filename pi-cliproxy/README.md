@@ -27,7 +27,7 @@ Without this entry the provider registers no models.
 
 Pi asks the proxy for its model list in the background after an interactive or RPC session starts, and remembers the result for the next start. Print mode and `pi --list-models` use the remembered list, so start Pi interactively once after installing.
 
-The proxy reports model ids only. Context windows, output limits, and thinking levels come from Pi's built-in `anthropic` and `openai` catalogs, and ids Pi does not know are left out. Claude models use the Anthropic Messages API and the rest use the OpenAI Responses API.
+The proxy reports model ids only. Context windows, output limits, and thinking levels come from Pi's built-in `anthropic`, `openai` and `meta` catalogs, and ids Pi does not know are left out. Claude models use the Anthropic Messages API and the rest use the OpenAI Responses API.
 
 Costs are reported as zero because requests are billed to the subscriptions behind the proxy.
 

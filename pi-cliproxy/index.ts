@@ -11,7 +11,11 @@ const DISCOVERY_TIMEOUT_MS = 10_000;
  * skipped rather than guessed at.
  */
 function builtinCatalog(): Map<string, Model<Api>> {
-	const models = [...getBuiltinModels("openai"), ...getBuiltinModels("anthropic")] as Model<Api>[];
+	const models = [
+		...getBuiltinModels("openai"),
+		...getBuiltinModels("anthropic"),
+		...getBuiltinModels("meta"),
+	] as Model<Api>[];
 	return new Map(models.map((model) => [model.id, model]));
 }
 
