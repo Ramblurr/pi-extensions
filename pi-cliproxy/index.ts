@@ -15,6 +15,7 @@ function builtinCatalog(): Map<string, Model<Api>> {
 		...getBuiltinModels("openai"),
 		...getBuiltinModels("anthropic"),
 		...getBuiltinModels("meta"),
+		...getBuiltinModels("openrouter"),
 	] as Model<Api>[];
 	return new Map(models.map((model) => [model.id, model]));
 }
@@ -60,8 +61,8 @@ async function discoverModels(root: string, apiKey: string, signal: AbortSignal)
 			provider: PROVIDER_ID,
 			// The Anthropic client appends /v1 itself; the OpenAI Responses client does not.
 			baseUrl: model.api === "anthropic-messages" ? root : `${root}/v1`,
-			// Requests are billed to the subscriptions behind the proxy, not per token.
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			// Preserve metered upstream prices; subscription models have no per-token charge.
+			cost: model.provider === "openrouter" ? model.cost : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		}));
 }
 

@@ -27,9 +27,9 @@ Without this entry the provider registers no models.
 
 Pi asks the proxy for its model list in the background after an interactive or RPC session starts, and remembers the result for the next start. Print mode and `pi --list-models` use the remembered list, so start Pi interactively once after installing.
 
-The proxy reports model ids only. Context windows, output limits, and thinking levels come from Pi's built-in `anthropic`, `openai` and `meta` catalogs, and ids Pi does not know are left out, except a few Muse Wonder variants that borrow `muse-wonder-1.0`'s limits. Claude models use the Anthropic Messages API and the rest use the OpenAI Responses API.
+The proxy reports model ids only. Context windows, output limits, and thinking levels come from Pi's built-in `anthropic`, `openai`, `meta` and `openrouter` catalogs, and ids Pi does not know are left out, except a few Muse Wonder variants that borrow `muse-wonder-1.0`'s limits. Each model keeps the API protocol from its catalog. OpenRouter models retain their exact IDs.
 
-Costs are reported as zero because requests are billed to the subscriptions behind the proxy.
+Subscription models report zero per-token cost. OpenRouter models retain their catalog prices.
 
 ## Install
 
