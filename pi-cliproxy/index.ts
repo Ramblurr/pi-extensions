@@ -19,6 +19,21 @@ function builtinCatalog(): Map<string, Model<Api>> {
 	return new Map(models.map((model) => [model.id, model]));
 }
 
+/** Proxy ids missing from Pi's catalogs, mapped to the catalog model whose limits they share. */
+const ALIASES: Record<string, { base: string; name: string }> = {
+	"muse-wonder-1.0-contributor": { base: "muse-wonder-1.0", name: "Muse Wonder (Contributor)" },
+	"muse-wonder-full-1.0": { base: "muse-wonder-1.0", name: "Muse Wonder Full" },
+	"muse-wonder-full-1.0-contributor": { base: "muse-wonder-1.0", name: "Muse Wonder Full (Contributor)" },
+};
+
+function lookup(catalog: Map<string, Model<Api>>, id: string): Model<Api> | undefined {
+	const known = catalog.get(id);
+	if (known) return known;
+	const alias = ALIASES[id];
+	const base = alias && catalog.get(alias.base);
+	return base && { ...base, id, name: alias.name };
+}
+
 /** Accepts the proxy root with or without a trailing slash or /v1. */
 function proxyRoot(baseUrl: string): string {
 	return baseUrl.trim().replace(/\/+$/, "").replace(/\/v1$/, "");
@@ -38,7 +53,7 @@ async function discoverModels(root: string, apiKey: string, signal: AbortSignal)
 	const ids = new Set(payload.data.map((entry) => entry.id).filter((id): id is string => typeof id === "string"));
 	return [...ids]
 		.sort()
-		.map((id) => catalog.get(id))
+		.map((id) => lookup(catalog, id))
 		.filter((model): model is Model<Api> => model !== undefined)
 		.map((model) => ({
 			...model,
