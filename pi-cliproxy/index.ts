@@ -17,7 +17,21 @@ function builtinCatalog(): Map<string, Model<Api>> {
 		...getBuiltinModels("meta"),
 		...getBuiltinModels("openrouter"),
 	] as Model<Api>[];
-	return new Map(models.map((model) => [model.id, model]));
+	const catalog = new Map(models.map((model) => [model.id, model]));
+	// OpenRouter /api/v1/models, 2026-11-16: Pi 1.5.2 predates Carbon.
+	// Reuse the Gemini OpenRouter transport compatibility, with Carbon's published limits/prices.
+	const gemini = catalog.get("google/gemini-3.1-pro-preview");
+	if (gemini && !catalog.has("google/gemini-4-carbon")) {
+		catalog.set("google/gemini-4-carbon", {
+			...gemini,
+			id: "google/gemini-4-carbon",
+			name: "Google: Gemini 4 Carbon",
+			contextWindow: 1048576,
+			maxTokens: 943718,
+			cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0.1875 },
+		});
+	}
+	return catalog;
 }
 
 /** Proxy ids missing from Pi's catalogs, mapped to the catalog model whose limits they share. */

@@ -42,3 +42,5 @@ pi install /absolute/path/to/pi-extensions/pi-cliproxy
 ```bash
 pi -e /absolute/path/to/pi-extensions/pi-cliproxy/index.ts
 ```
+
+Gemini 4 Carbon has an explicit fallback for Pi 1.5.2, using OpenRouter catalog limits and prices retrieved on 2026-11-16. Its transport compatibility follows Pi's Gemini 3.1 Pro OpenRouter entry. A future built-in Carbon entry takes precedence.
