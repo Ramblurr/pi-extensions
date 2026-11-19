@@ -36,6 +36,9 @@ function builtinCatalog(): Map<string, Model<Api>> {
 
 /** Proxy ids missing from Pi's catalogs, mapped to the catalog model whose limits they share. */
 const ALIASES: Record<string, { base: string; name: string }> = {
+	// Pi 1.5.2's built-in OpenAI catalog predates the 6.2 models; borrow their predecessors' limits.
+	"gpt-6.2-sol": { base: "gpt-6.1-sol", name: "GPT-6.2 Sol" },
+	"gpt-6.2-astra": { base: "gpt-6-astra", name: "GPT-6.2 Astra" },
 	"muse-wonder-1.0-contributor": { base: "muse-wonder-1.0", name: "Muse Wonder (Contributor)" },
 	"muse-wonder-full-1.0": { base: "muse-wonder-1.0", name: "Muse Wonder Full" },
 	"muse-wonder-full-1.0-contributor": { base: "muse-wonder-1.0", name: "Muse Wonder Full (Contributor)" },
