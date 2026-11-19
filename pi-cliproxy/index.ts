@@ -90,7 +90,14 @@ async function refreshModels(context: RefreshModelsContext): Promise<Model<Api>[
 	const apiKey = context.credential?.type === "api_key" ? context.credential.key : undefined;
 	if (!context.baseUrl || !apiKey) return cached;
 
-	const models = await discoverModels(proxyRoot(context.baseUrl), apiKey, context.signal);
+	const discovered = await discoverModels(proxyRoot(context.baseUrl), apiKey, context.signal);
+	// The proxy omits models whose upstream auth is in cooldown from /v1/models.
+	// Keep last-known models that discovery did not return, so a transient
+	// cooldown cannot make a configured model vanish (RPC set_model fails hard
+	// on an unknown model). Trade-off: a model removed upstream for good stays
+	// listed until the stored models are cleared.
+	const discoveredIds = new Set(discovered.map((model) => model.id));
+	const models = [...discovered, ...cached.filter((model) => !discoveredIds.has(model.id))];
 	// Persist so the models exist at startup, before the next background refresh.
 	await context.publish({ persist: { models, checkedAt: Date.now() } });
 	return models;
