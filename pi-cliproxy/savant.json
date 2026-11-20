@@ -1,0 +1,33 @@
+{
+  "api": "openai-completions",
+  "compat": {
+    "maxTokensField": "max_tokens",
+    "supportsDeveloperRole": false,
+    "supportsReasoningEffort": true,
+    "thinkingFormat": "openai"
+  },
+  "contextWindow": 4000000,
+  "cost": {
+    "cacheRead": 0.01,
+    "cacheWrite": 0,
+    "input": 0.1,
+    "output": 0.5
+  },
+  "id": "subq-savant-1.4",
+  "input": [
+    "text",
+    "image"
+  ],
+  "maxTokens": 32768,
+  "name": "SubQ Savant 1.4",
+  "reasoning": true,
+  "thinkingLevelMap": {
+    "high": "high",
+    "low": "low",
+    "max": "max",
+    "medium": null,
+    "minimal": null,
+    "off": null,
+    "xhigh": null
+  }
+}

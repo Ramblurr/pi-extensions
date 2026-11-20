@@ -1,9 +1,11 @@
 import type { Api, Model, RefreshModelsContext } from "@earendil-works/pi-ai";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ProviderConfig } from "@earendil-works/pi-coding-agent";
+import savantCatalog from "./savant.json" with { type: "json" };
 
 const PROVIDER_ID = "cliproxy";
 const DISCOVERY_TIMEOUT_MS = 10_000;
+const savant = savantCatalog as Omit<Model<"openai-completions">, "provider" | "baseUrl">;
 
 /**
  * The proxy's /v1/models returns ids only, so context windows, output limits,
@@ -83,21 +85,28 @@ async function discoverModels(root: string, apiKey: string, signal: AbortSignal)
 		}));
 }
 
-async function refreshModels(context: RefreshModelsContext): Promise<Model<Api>[]> {
+async function refreshModels(context: RefreshModelsContext): Promise<Model<Api>[] | undefined> {
 	const cached = (context.stored?.models ?? []) as Model<Api>[];
-	if (!context.allowNetwork) return cached;
+	if (!context.baseUrl) return cached.length ? cached : undefined;
+
+	const root = proxyRoot(context.baseUrl);
+	const includeSavant = (models: Model<Api>[]): Model<Api>[] => [
+		...models.filter((model) => model.id !== savant.id),
+		{ ...savant, provider: PROVIDER_ID, baseUrl: `${root}/v1` },
+	];
 
 	const apiKey = context.credential?.type === "api_key" ? context.credential.key : undefined;
-	if (!context.baseUrl || !apiKey) return cached;
+	if (!context.allowNetwork || !apiKey) return cached.length ? includeSavant(cached) : undefined;
 
-	const discovered = await discoverModels(proxyRoot(context.baseUrl), apiKey, context.signal);
+	const discovered = await discoverModels(root, apiKey, context.signal);
 	// The proxy omits models whose upstream auth is in cooldown from /v1/models.
 	// Keep last-known models that discovery did not return, so a transient
 	// cooldown cannot make a configured model vanish (RPC set_model fails hard
 	// on an unknown model). Trade-off: a model removed upstream for good stays
 	// listed until the stored models are cleared.
 	const discoveredIds = new Set(discovered.map((model) => model.id));
-	const models = [...discovered, ...cached.filter((model) => !discoveredIds.has(model.id))];
+	// Savant is configured on the proxy even when discovery omits it.
+	const models = includeSavant([...discovered, ...cached.filter((model) => !discoveredIds.has(model.id))]);
 	// Persist so the models exist at startup, before the next background refresh.
 	await context.publish({ persist: { models, checkedAt: Date.now() } });
 	return models;
@@ -109,5 +118,9 @@ async function refreshModels(context: RefreshModelsContext): Promise<Model<Api>[
  * `cliproxy` provider entry in models.json.
  */
 export default function cliproxyExtension(pi: ExtensionAPI) {
-	pi.registerProvider(PROVIDER_ID, { name: "CLIProxyAPI", refreshModels });
+	pi.registerProvider(PROVIDER_ID, {
+		name: "CLIProxyAPI",
+		// Pi preserves models.json on undefined, although its callback type requires an array.
+		refreshModels: refreshModels as ProviderConfig["refreshModels"],
+	});
 }

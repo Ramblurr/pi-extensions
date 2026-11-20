@@ -19,7 +19,7 @@ const context: ClassifierContext = {
 	},
 };
 const responseBody = {
-	model: "subq-snap-1.1",
+	model: "subq-snap-1.2",
 	answers: {
 		escalate: { type: "noul", noul: 0.9 },
 		queue: { type: "choice", choice: "support", probabilities: { support: 0.8, sales: 0.2 }, confidence: 0.8 },
@@ -161,7 +161,7 @@ test("Pi runtime discovers Snap and resolves models.json credential commands", a
 
 test("registers only Snap as a classifier, with API-key login", () => {
 	assert.deepEqual(provider.getModels(), []);
-	assert.equal(model.id, "subq-snap-1.1");
+	assert.equal(model.id, "subq-snap-1.2");
 	assert.equal(model.contextWindow, 393216);
 	assert.deepEqual(model.input, ["text", "image"]);
 	assert.equal(typeof provider.auth?.apiKey?.login, "function");

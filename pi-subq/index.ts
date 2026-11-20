@@ -38,8 +38,8 @@ export function createSubqProvider(): Provider {
 		models: [
 			{
 				type: "classifier",
-				id: "subq-snap-1.1",
-				name: "SubQ Snap 1.1",
+				id: "subq-snap-1.2",
+				name: "SubQ Snap 1.2",
 				provider: "subq",
 				api: API,
 				baseUrl: "https://api.subq.ai/v1",

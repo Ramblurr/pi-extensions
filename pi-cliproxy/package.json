@@ -17,6 +17,7 @@
   },
   "files": [
     "index.ts",
+    "savant.json",
     "README.md"
   ],
   "peerDependencies": {

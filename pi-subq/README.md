@@ -1,7 +1,7 @@
 # pi-subq
 
 SubQ Snap text and image decisions through Pi's codemode `models.classify()`.
-Registers `subq/subq-snap-1.1` as a classifier, not a chat model. Tested with Pi 1.4.0.
+Registers `subq/subq-snap-1.2` as a classifier, not a chat model. Tested with Pi 1.4.0.
 It does not register the early-access `subq-preview` chat model.
 
 ## Load and authenticate
@@ -38,7 +38,7 @@ Enable codemode in Pi settings if it is not already enabled:
 ## Classify with codemode
 
 ```js
-const snap = await models.getModelOfType("classifier", "subq", "subq-snap-1.1");
+const snap = await models.getModelOfType("classifier", "subq", "subq-snap-1.2");
 const result = await models.classify(snap, {
   state: { message: "Thanks, that fixed it!" },
   questions: {

@@ -31,6 +31,8 @@ The proxy reports model ids only. Context windows, output limits, and thinking l
 
 Subscription models report zero per-token cost. OpenRouter models retain their catalog prices.
 
+SubQ Savant 1.4 uses Chat Completions and reports its metered input, cached input, and output rates. When you configure Savant in the proxy, add the model from `savant.json` to the Pi provider's `models` list with a model-level `baseUrl` ending in `/v1` to make it available on a cold start. The extension retains Savant when discovery temporarily omits it.
+
 ## Install
 
 ```bash
